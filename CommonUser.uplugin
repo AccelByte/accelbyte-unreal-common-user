@@ -19,6 +19,11 @@
 			"Name": "CommonUser",
 			"Type": "Runtime",
 			"LoadingPhase": "Default"
+		},
+		{
+			"Name": "AccelByteSocialToolkit",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
 		}
 	],
 	"Plugins": [
@@ -32,6 +37,18 @@
 		},
 		{
 			"Name": "OnlineServices",
+			"Enabled": true
+		},
+		{
+			"Name": "OnlineFramework",
+			"Enabled": true
+		},
+		{
+			"Name": "AccelByteUe4Sdk",
+			"Enabled": true
+		},
+		{
+			"Name": "OnlineSubsystemAccelByte",
 			"Enabled": true
 		}
 	]

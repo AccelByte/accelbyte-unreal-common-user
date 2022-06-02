@@ -1,6 +1,8 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "CommonSessionSubsystem.h"
+
+#include "OnlineSessionInterfaceAccelByte.h"
 #include "GameFramework/GameModeBase.h"
 #include "Engine/AssetManager.h"
 #include "Engine/Engine.h"
@@ -335,8 +337,17 @@ void UCommonSessionSubsystem::BindOnlineDelegatesOSSv1()
 	SessionInterface->AddOnEndSessionCompleteDelegate_Handle(FOnEndSessionCompleteDelegate::CreateUObject(this, &ThisClass::OnEndSessionComplete));
 	SessionInterface->AddOnDestroySessionCompleteDelegate_Handle(FOnDestroySessionCompleteDelegate::CreateUObject(this, &ThisClass::OnDestroySessionComplete));
 
-//	SessionInterface->AddOnMatchmakingCompleteDelegate_Handle(FOnMatchmakingCompleteDelegate::CreateUObject(this, &ThisClass::OnMatchmakingComplete));
-//	SessionInterface->AddOnCancelMatchmakingCompleteDelegate_Handle(FOnCancelMatchmakingCompleteDelegate::CreateUObject(this, &ThisClass::OnCancelMatchmakingComplete));
+	// #START @AccelByte Implementation
+	SessionInterface->AddOnMatchmakingCompleteDelegate_Handle(FOnMatchmakingCompleteDelegate::CreateUObject(this, &ThisClass::OnMatchmakingComplete));
+	SessionInterface->AddOnCancelMatchmakingCompleteDelegate_Handle(FOnCancelMatchmakingCompleteDelegate::CreateUObject(this, &ThisClass::OnCancelMatchmakingComplete));
+	if(OnlineSub->GetSubsystemName().IsEqual(TEXT("AccelByte"), ENameCase::IgnoreCase))
+	{
+		// Subscribe Start matchmaking notif
+		FOnlineSessionAccelBytePtr SessionAccelBytePtr = StaticCastSharedPtr<FOnlineSessionAccelByte>(SessionInterface);
+		SessionAccelBytePtr->AddOnMatchmakingStartedDelegate_Handle(FOnMatchmakingStartedDelegate::CreateUObject(this, &ThisClass::OnMatchmakingStarted));
+		SessionAccelBytePtr->AddOnMatchmakingFailedDelegate_Handle(FOnMatchmakingFailedDelegate::CreateUObject(this, &ThisClass::OnMatchmakingTimeout));
+	}
+	// #END
 
 	SessionInterface->AddOnFindSessionsCompleteDelegate_Handle(FOnFindSessionsCompleteDelegate::CreateUObject(this, &ThisClass::OnFindSessionsComplete));
 // 	SessionInterface->AddOnCancelFindSessionsCompleteDelegate_Handle(FOnCancelFindSessionsCompleteDelegate::CreateUObject(this, &ThisClass::OnCancelFindSessionsComplete));
@@ -643,6 +654,68 @@ void UCommonSessionSubsystem::OnDestroySessionComplete(FName SessionName, bool b
 	UE_LOG(LogCommonSession, Log, TEXT("OnDestroySessionComplete(SessionName: %s, bWasSuccessful: %s)"), *SessionName.ToString(), bWasSuccessful ? TEXT("true") : TEXT("false"));
 	bWantToDestroyPendingSession = false;
 }
+
+
+// #START @AccelByte Implementation Matchmaking Handler
+void UCommonSessionSubsystem::OnMatchmakingStarted()
+{
+	OnMatchmakingStartDelegate.Broadcast();
+}
+
+void UCommonSessionSubsystem::OnMatchmakingComplete(FName SessionName, bool bWasSuccessful)
+{
+	UE_LOG(LogCommonSession, Log, TEXT("OnMatchmakingComplete(SessionName: %s, bWasSuccessful: %s)"), *SessionName.ToString(), bWasSuccessful ? TEXT("true") : TEXT("false"));
+
+	FCommonOnlineSearchSettingsOSSv1& SearchSettingsV1 = *StaticCastSharedPtr<FCommonOnlineSearchSettingsOSSv1>(SearchSettings);
+	if (SearchSettingsV1.SearchState == EOnlineAsyncTaskState::InProgress)
+	{
+		UE_LOG(LogCommonSession, Error, TEXT("OnFindSessionsComplete called when search is still in progress!"));
+		return;
+	}
+
+	if (!ensure(SearchSettingsV1.SearchRequest))
+	{
+		UE_LOG(LogCommonSession, Error, TEXT("OnFindSessionsComplete called with invalid search request object!"));
+		return;
+	}
+
+	if (bWasSuccessful)
+	{
+		SearchSettingsV1.SearchRequest->Results.Reset(SearchSettingsV1.SearchResults.Num());
+
+		for (const FOnlineSessionSearchResult& Result : SearchSettingsV1.SearchResults)
+		{
+			UCommonSession_SearchResult* Entry = NewObject<UCommonSession_SearchResult>(SearchSettingsV1.SearchRequest);
+			Entry->Result = Result;
+			SearchSettingsV1.SearchRequest->Results.Add(Entry);
+		}
+	}
+	else
+	{
+		SearchSettingsV1.SearchRequest->Results.Empty();
+	}
+
+	SearchSettingsV1.SearchRequest->NotifySearchFinished(bWasSuccessful, bWasSuccessful ? FText() : LOCTEXT("Error_Matchmaking Failed!", "Please look at log file"));
+	SearchSettings.Reset();
+}
+void UCommonSessionSubsystem::OnCancelMatchmakingComplete(FName SessionName, bool bWasSuccessful)
+{
+	UE_LOG(LogCommonSession, Log, TEXT("OnCancelMatchmakingComplete(SessionName: %s, bWasSuccessful: %s)"), *SessionName.ToString(), bWasSuccessful ? TEXT("true") : TEXT("false"));
+
+	OnMatchmakingCanceledDelegate.Broadcast();
+	CleanUpSessions();
+}
+
+void UCommonSessionSubsystem::OnMatchmakingTimeout(const FErrorInfo& Error)
+{
+	UE_LOG(LogCommonSession, Log, TEXT("OnMatchmakingTimeoutDelegate"));
+
+	OnMatchmakingTimeoutDelegate.Broadcast(Error);
+	CleanUpSessions();
+}
+
+// #END
+
 #endif // COMMONUSER_OSSV1
 
 void UCommonSessionSubsystem::FindSessions(APlayerController* SearchingPlayer, UCommonSession_SearchSessionRequest* Request)
@@ -680,6 +753,7 @@ void UCommonSessionSubsystem::FindSessionsInternal(APlayerController* SearchingP
 	}
 
 	SearchSettings = InSearchSettings;
+
 #if COMMONUSER_OSSV1
 	FindSessionsInternalOSSv1(LocalPlayer);
 #else
@@ -694,7 +768,26 @@ void UCommonSessionSubsystem::FindSessionsInternalOSSv1(ULocalPlayer* LocalPlaye
 	check(OnlineSub);
 	IOnlineSessionPtr Sessions = OnlineSub->GetSessionInterface();
 	check(Sessions);
-
+	
+	// #START @AccelByte Implementation
+	FString GameMode;
+	FString SearchingMM;
+	bool bIsDedicated = false;
+	SearchSettings->QuerySettings.Get<FString>(SETTING_GAMEMODE, GameMode);
+	SearchSettings->QuerySettings.Get<FString>(SEARCH_MATCHMAKING_QUEUE, SearchingMM);
+	SearchSettings->QuerySettings.Get<bool>(SEARCH_DEDICATED_ONLY, bIsDedicated);
+	if(!GameMode.IsEmpty() && GameMode.Equals(SearchingMM) && bIsDedicated)
+	{
+		TSharedRef<FOnlineSessionSearch> SearchSession = ConstCastSharedRef<FCommonOnlineSearchSettingsOSSv1>(SearchSettings.ToSharedRef());
+		Sessions->StartMatchmaking(
+			{LocalPlayer->GetPreferredUniqueNetId()->AsShared()},
+			NAME_GameSession,
+			FOnlineSessionSettings(),
+			SearchSession
+		);
+	}
+	else
+	// #END	
 	if (!Sessions->FindSessions(*LocalPlayer->GetPreferredUniqueNetId().GetUniqueNetId(), StaticCastSharedRef<FCommonOnlineSearchSettingsOSSv1>(SearchSettings.ToSharedRef())))
 	{
 		// Some session search failures will call this delegate inside the function, others will not
@@ -784,6 +877,42 @@ void UCommonSessionSubsystem::QuickPlaySession(APlayerController* JoiningOrHosti
 	FindSessionsInternal(JoiningOrHostingPlayer, CreateQuickPlaySearchSettings(HostRequest, QuickPlayRequest));
 }
 
+/** #START @AccelByte Implementation : Starts a process to matchmaking with other player. */
+void UCommonSessionSubsystem::MatchmakingSession(APlayerController* JoiningOrHostingPlayer, UCommonSession_HostSessionRequest* HostRequest, UCommonSession_SearchSessionRequest*& OutMatchmakingSessionRequest)
+{
+	UE_LOG(LogCommonSession, Log, TEXT("Matchmaking Requested"));
+	
+	if (HostRequest == nullptr)
+	{
+		UE_LOG(LogCommonSession, Error, TEXT("Matchmaking passed a null request"));
+		return;
+	}
+	
+	TStrongObjectPtr<UCommonSession_HostSessionRequest> HostRequestPtr = TStrongObjectPtr<UCommonSession_HostSessionRequest>(HostRequest);
+	TWeakObjectPtr<APlayerController> JoiningOrHostingPlayerPtr = TWeakObjectPtr<APlayerController>(JoiningOrHostingPlayer);
+
+	OutMatchmakingSessionRequest = CreateOnlineSearchSessionRequest();
+	OutMatchmakingSessionRequest->OnSearchFinished.AddUObject(this, &UCommonSessionSubsystem::HandleMatchmakingFinished, JoiningOrHostingPlayerPtr, HostRequestPtr);
+	
+	FindSessionsInternal(JoiningOrHostingPlayer, CreateMatchmakingSearchSettings(HostRequest, OutMatchmakingSessionRequest));
+}
+
+void UCommonSessionSubsystem::CancelMatchmakingSession(APlayerController* CancelPlayer)
+{	
+	IOnlineSubsystem* OnlineSub = Online::GetSubsystem(GetWorld());
+	check(OnlineSub);
+	IOnlineSessionPtr Sessions = OnlineSub->GetSessionInterface();
+	check(Sessions);
+
+	SearchSettings.Reset();
+
+	int32 LocalPlayerIndex = CancelPlayer->GetLocalPlayer()->GetLocalPlayerIndex();
+	
+	Sessions->CancelMatchmaking(LocalPlayerIndex, NAME_GameSession);
+}
+
+// #END
+
 TSharedRef<FCommonOnlineSearchSettings> UCommonSessionSubsystem::CreateQuickPlaySearchSettings(UCommonSession_HostSessionRequest* HostRequest, UCommonSession_SearchSessionRequest* SearchRequest)
 {
 #if COMMONUSER_OSSV1
@@ -812,6 +941,18 @@ TSharedRef<FCommonOnlineSearchSettings> UCommonSessionSubsystem::CreateQuickPlay
 
 	// QuickPlaySearch->QuerySettings.Set(SEARCH_DEDICATED_ONLY, true, EOnlineComparisonOp::Equals);
 	return QuickPlaySearch;
+}
+
+TSharedRef<FCommonOnlineSearchSettings> UCommonSessionSubsystem::CreateMatchmakingSearchSettings(
+	UCommonSession_HostSessionRequest* Request, UCommonSession_SearchSessionRequest* SearchRequest)
+{
+	TSharedRef<FCommonOnlineSearchSettingsOSSv1> MatchmakingSearch = MakeShared<FCommonOnlineSearchSettingsOSSv1>(SearchRequest);
+
+	MatchmakingSearch->QuerySettings.Set(SETTING_GAMEMODE, Request->AccelByteGameMode, EOnlineComparisonOp::Equals);
+	MatchmakingSearch->QuerySettings.Set(SEARCH_MATCHMAKING_QUEUE, Request->AccelByteGameMode, EOnlineComparisonOp::Equals);
+	MatchmakingSearch->QuerySettings.Set(SEARCH_DEDICATED_ONLY, true, EOnlineComparisonOp::Equals);
+	MatchmakingSearch->QuerySettings.Set(SETTING_MAPNAME, Request->GetMapName(), EOnlineComparisonOp::Equals);
+	return MatchmakingSearch;
 }
 
 #else
@@ -863,6 +1004,30 @@ void UCommonSessionSubsystem::HandleQuickPlaySearchFinished(bool bSucceeded, con
 	{
 		//@TODO: This sucks, need to tell someone.
 	}
+}
+
+void UCommonSessionSubsystem::HandleMatchmakingFinished(bool bSucceeded, const FText& ErrorMessage,
+	TWeakObjectPtr<APlayerController> JoiningOrHostingPlayer,
+	TStrongObjectPtr<UCommonSession_HostSessionRequest> HostRequest)
+{
+	const int32 ResultCount = SearchSettings->SearchRequest->Results.Num();
+	UE_LOG(LogCommonSession, Log, TEXT("Matchmaking Search Finished %s (Results %d) (Error: %s)"), bSucceeded ? TEXT("Success") : TEXT("Failed"), ResultCount, *ErrorMessage.ToString());
+
+	if (bSucceeded || ErrorMessage.IsEmpty())
+	{
+		// Matchmaking found suitable DS.
+		if (ResultCount > 0)
+		{
+			for (UCommonSession_SearchResult* Result : SearchSettings->SearchRequest->Results)
+			{
+				JoinSession(JoiningOrHostingPlayer.Get(), Result);
+				return;
+			}
+		}
+	}
+
+	// Fail, cleanup session
+	CleanUpSessions();
 }
 
 void UCommonSessionSubsystem::CleanUpSessions()
@@ -1206,6 +1371,9 @@ void UCommonSessionSubsystem::InternalTravelToSession(const FName SessionName)
 	}
 #endif // COMMONUSER_OSSV1
 
+	// #START @AccelByte Implementation : Add options for the prefered map, it will load the map on the server after first player join.
+	//URL.Append(TEXT("?preferedMap=%s"), *SearchSettings->);
+	// #END
 	PlayerController->ClientTravel(URL, TRAVEL_Absolute);
 }
 

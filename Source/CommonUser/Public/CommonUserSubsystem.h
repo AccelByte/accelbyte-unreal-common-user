@@ -420,7 +420,8 @@ protected:
 			, DesiredPrivilege(InPrivilege)
 			, DesiredContext(InContext)
 			, Delegate(MoveTemp(InDelegate))
-			{}
+		{
+		}
 
 		/** Which local user is trying to log on */
 		TWeakObjectPtr<UCommonUserInfo> UserInfo;
@@ -436,6 +437,11 @@ protected:
 
 		/** State of attempt to use external login UI */
 		ECommonUserAsyncTaskState LoginUIState = ECommonUserAsyncTaskState::NotStarted;
+
+		// #START @AccelByte ImplementationManualLoginState
+		/** State of attempt to use ManualLogin */
+		ECommonUserAsyncTaskState ManualLoginState = ECommonUserAsyncTaskState::NotStarted;
+		// #END
 
 		/** Final privilege to that is requested */
 		ECommonUserPrivilege DesiredPrivilege = ECommonUserPrivilege::Invalid_Count;
@@ -498,6 +504,14 @@ protected:
 	/** Call ShowLoginUI on OSS. Return true if ShowLoginUI started. */
 	virtual bool ShowLoginUI(FOnlineContextCache* System, TSharedRef<FUserLoginRequest> Request, int32 PlatformUserIndex);
 
+	//#START @AccelByte ImplementationManualLoginAccelByte
+	/** Call ShowLoginUI on OSS. Return true if ShowLoginUI started. */
+	virtual bool ManualLoginAccelByte(FOnlineContextCache* System, TSharedRef<FUserLoginRequest> Request, int32 PlatformUserIndex);
+
+	UFUNCTION(BlueprintCallable, Category = CommonUser)
+	virtual void SetAccelByteUserCreds(const FString& Username, const FString& Password);
+	//#END
+	
 	/** Call QueryUserPrivilege on OSS. Return true if QueryUserPrivilege started. */
 	virtual bool QueryUserPrivilege(FOnlineContextCache* System, TSharedRef<FUserLoginRequest> Request, int32 PlatformUserIndex);
 

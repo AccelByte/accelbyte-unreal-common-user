@@ -471,6 +471,53 @@ bool UCommonUserSubsystem::ShowLoginUI(FOnlineContextCache* System, TSharedRef<F
 #endif
 }
 
+// START @AccelByte Implementation  ManualLogin
+bool UCommonUserSubsystem::ManualLoginAccelByte(FOnlineContextCache* System, TSharedRef<FUserLoginRequest> Request,	int32 PlatformUserIndex)
+{
+	return System->IdentityInterface->AutoLogin(PlatformUserIndex);
+}
+
+void UCommonUserSubsystem::SetAccelByteUserCreds(const FString& Username, const FString& Password)
+{
+	if(Username.IsEmpty() || Password.IsEmpty())
+	{
+		UE_LOG(LogCommonUser, Error, TEXT("Username or Password cannot be empty!"));
+		return;
+	}
+	
+	FString CmdArgs = FCommandLine::Get();
+	if(!CmdArgs.Contains(TEXT("-AUTH_TYPE=ACCELBYTE")))
+	{
+		CmdArgs.Append(*FString::Printf(TEXT(" -AUTH_TYPE=ACCELBYTE")));
+	}
+
+	if(CmdArgs.Contains(TEXT("-AUTH_LOGIN=")))
+	{
+		FString OldId;
+		FParse::Value(FCommandLine::Get(), TEXT("-AUTH_LOGIN="), OldId);
+		CmdArgs = CmdArgs.Replace(*OldId, *Username);
+	}
+	else
+	{
+		CmdArgs.Append(*FString::Printf(TEXT(" -AUTH_LOGIN=%s"), *Username));
+	}
+	
+	if(CmdArgs.Contains(TEXT("-AUTH_PASSWORD=")))
+	{
+		FString OldPassword;
+		FParse::Value(FCommandLine::Get(), TEXT("-AUTH_PASSWORD="), OldPassword);
+		CmdArgs = CmdArgs.Replace(*OldPassword, *Password);
+	}
+	else
+	{
+		CmdArgs.Append(*FString::Printf(TEXT(" -AUTH_PASSWORD=%s"), *Password));
+	}
+
+	FCommandLine::Set(*CmdArgs);
+}
+
+// #END
+
 bool UCommonUserSubsystem::QueryUserPrivilege(FOnlineContextCache* System, TSharedRef<FUserLoginRequest> Request, int32 PlatformUserIndex)
 {
 #if COMMONUSER_OSSV1
@@ -1020,7 +1067,7 @@ bool UCommonUserSubsystem::TryToInitializeUser(FCommonUserInitializeParams Param
 	{
 		LocalUserInfo->InitializationState = ECommonUserInitializationState::DoingInitialLogin;
 	}
-
+	
 	LoginLocalUser(LocalUserInfo, Params.RequestedPrivilege, Params.OnlineContext, FOnLocalUserLoginCompleteDelegate::CreateUObject(this, &ThisClass::HandleLoginForUserInitialize, Params));
 
 	return true;
@@ -1499,16 +1546,49 @@ void UCommonUserSubsystem::ProcessLoginRequest(TSharedRef<FUserLoginRequest> Req
 				{
 					return;
 				}
+				
 				// We didn't show a UI, so set failure
 				Request->LoginUIState = ECommonUserAsyncTaskState::Failed;
 			}
 		}
+
+		// #START @AccelByte Implementation  ManualLogin
+		bool bLoginUsingAB = false;
+		GConfig->GetBool(TEXT("AccelByteLogin"), TEXT("bEnabled"), bLoginUsingAB, GEngineIni);
+		if(bLoginUsingAB && Request->ManualLoginState == ECommonUserAsyncTaskState::NotStarted)
+		{
+			if ((Request->TransferPlatformAuthState == ECommonUserAsyncTaskState::Done || Request->TransferPlatformAuthState == ECommonUserAsyncTaskState::Failed)
+				&& (Request->AutoLoginState == ECommonUserAsyncTaskState::Done || Request->AutoLoginState == ECommonUserAsyncTaskState::Failed)
+				&& (Request->LoginUIState == ECommonUserAsyncTaskState::Done || Request->LoginUIState == ECommonUserAsyncTaskState::Failed))
+			{
+				Request->ManualLoginState = ECommonUserAsyncTaskState::InProgress;
+				Request->Error.Reset();
+
+				if(ManualLoginAccelByte(System, Request, PlatformUserIndex))
+				{
+					return;
+				}
+				Request->ManualLoginState = ECommonUserAsyncTaskState::Failed;
+			}
+			
+		}
+		else
+		{
+			// set failed directly
+			Request->ManualLoginState = ECommonUserAsyncTaskState::Failed;
+		}
+		// #END
 	}
 
 	// Check for overall failure
 	if (Request->LoginUIState == ECommonUserAsyncTaskState::Failed &&
 		Request->AutoLoginState == ECommonUserAsyncTaskState::Failed &&
-		Request->TransferPlatformAuthState == ECommonUserAsyncTaskState::Failed)
+		Request->TransferPlatformAuthState == ECommonUserAsyncTaskState::Failed &&
+
+		// #START @AccelByte Implementation  add failure condition on ManualLogin
+		Request->ManualLoginState == ECommonUserAsyncTaskState::Failed
+		// #END
+		)
 	{
 		Request->OverallLoginState = ECommonUserAsyncTaskState::Failed;
 	}
@@ -1617,6 +1697,14 @@ void UCommonUserSubsystem::HandleUserLoginCompleted(int32 PlatformUserIndex, boo
 			{
 				Request->AutoLoginState = bWasSuccessful ? ECommonUserAsyncTaskState::Done : ECommonUserAsyncTaskState::Failed;
 			}
+			
+			// #START @AccelByte Implementation  : Handle when manual login complete with failure
+			if (Request->ManualLoginState == ECommonUserAsyncTaskState::InProgress)
+			{
+				Request->ManualLoginState = bWasSuccessful ? ECommonUserAsyncTaskState::Done : ECommonUserAsyncTaskState::Failed;
+			}
+			// #END
+
 
 			if (!bWasSuccessful)
 			{
