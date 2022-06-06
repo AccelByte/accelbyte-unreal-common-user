@@ -792,6 +792,14 @@ void UCommonSessionSubsystem::FindSessionsInternalOSSv1(ULocalPlayer* LocalPlaye
 	SearchSettings->QuerySettings.Get<bool>(SEARCH_DEDICATED_ONLY, bIsDedicated);
 	if(!GameMode.IsEmpty() && GameMode.Equals(SearchingMM) && bIsDedicated)
 	{
+		// Overriding the matchmaking by command line (debugging purpose)
+		FString OverrideMatchmakingMode;
+		FParse::Value(FCommandLine::Get(), TEXT("-CUSTOM_MM_MODE="), OverrideMatchmakingMode);
+		if(!OverrideMatchmakingMode.IsEmpty())
+		{
+			SearchSettings->QuerySettings.Set(SETTING_GAMEMODE, OverrideMatchmakingMode, EOnlineComparisonOp::Equals);
+		}
+		
 		TSharedRef<FOnlineSessionSearch> SearchSession = ConstCastSharedRef<FCommonOnlineSearchSettingsOSSv1>(SearchSettings.ToSharedRef());
 		Sessions->StartMatchmaking(
 			{LocalPlayer->GetPreferredUniqueNetId()->AsShared()},
