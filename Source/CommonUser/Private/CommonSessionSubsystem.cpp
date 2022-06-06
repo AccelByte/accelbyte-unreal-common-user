@@ -972,6 +972,11 @@ TSharedRef<FCommonOnlineSearchSettings> UCommonSessionSubsystem::CreateMatchmaki
 	MatchmakingSearch->QuerySettings.Set(SEARCH_MATCHMAKING_QUEUE, Request->AccelByteGameMode, EOnlineComparisonOp::Equals);
 	MatchmakingSearch->QuerySettings.Set(SEARCH_DEDICATED_ONLY, true, EOnlineComparisonOp::Equals);
 	MatchmakingSearch->QuerySettings.Set(SETTING_MAPNAME, Request->GetMapName(), EOnlineComparisonOp::Equals);
+	FString* NumBots = Request->ExtraArgs.Find(TEXT("NumBots"));
+	if(NumBots != nullptr)
+	{
+		MatchmakingSearch->QuerySettings.Set(SETTING_NUMBOTS, FCString::Atoi(**NumBots), EOnlineComparisonOp::Equals);
+	}
 	return MatchmakingSearch;
 }
 
