@@ -346,6 +346,7 @@ void UCommonSessionSubsystem::BindOnlineDelegatesOSSv1()
 		FOnlineSessionAccelBytePtr SessionAccelBytePtr = StaticCastSharedPtr<FOnlineSessionAccelByte>(SessionInterface);
 		SessionAccelBytePtr->AddOnMatchmakingStartedDelegate_Handle(FOnMatchmakingStartedDelegate::CreateUObject(this, &ThisClass::OnMatchmakingStarted));
 		SessionAccelBytePtr->AddOnMatchmakingFailedDelegate_Handle(FOnMatchmakingFailedDelegate::CreateUObject(this, &ThisClass::OnMatchmakingTimeout));
+		SessionAccelBytePtr->AddOnReadyConsentRequestedDelegate_Handle(FOnReadyConsentRequestedDelegate::CreateUObject(this, &ThisClass::OnMatchFound));
 	}
 	// #END
 
@@ -666,6 +667,12 @@ void UCommonSessionSubsystem::OnMatchmakingComplete(FName SessionName, bool bWas
 {
 	UE_LOG(LogCommonSession, Log, TEXT("OnMatchmakingComplete(SessionName: %s, bWasSuccessful: %s)"), *SessionName.ToString(), bWasSuccessful ? TEXT("true") : TEXT("false"));
 
+	if(!SearchSettings.IsValid())
+	{
+		// matchmaking is failed or canceled
+		return;
+	}
+	
 	FCommonOnlineSearchSettingsOSSv1& SearchSettingsV1 = *StaticCastSharedPtr<FCommonOnlineSearchSettingsOSSv1>(SearchSettings);
 	if (SearchSettingsV1.SearchState == EOnlineAsyncTaskState::InProgress)
 	{
@@ -712,6 +719,13 @@ void UCommonSessionSubsystem::OnMatchmakingTimeout(const FErrorInfo& Error)
 
 	OnMatchmakingTimeoutDelegate.Broadcast(Error);
 	CleanUpSessions();
+}
+
+void UCommonSessionSubsystem::OnMatchFound(FString MatchId)
+{
+	UE_LOG(LogCommonSession, Log, TEXT("OnMatchFoundDelegate"));
+	
+	OnMatchFoundDelegate.Broadcast(MatchId);
 }
 
 // #END
@@ -881,6 +895,12 @@ void UCommonSessionSubsystem::QuickPlaySession(APlayerController* JoiningOrHosti
 void UCommonSessionSubsystem::MatchmakingSession(APlayerController* JoiningOrHostingPlayer, UCommonSession_HostSessionRequest* HostRequest, UCommonSession_SearchSessionRequest*& OutMatchmakingSessionRequest)
 {
 	UE_LOG(LogCommonSession, Log, TEXT("Matchmaking Requested"));
+	
+	if(SearchSettings.IsValid())
+	{
+		UE_LOG(LogCommonSession, Log, TEXT("Matchmaking Search Session already in progress. Aborting this request!"));
+		return;
+	}
 	
 	if (HostRequest == nullptr)
 	{

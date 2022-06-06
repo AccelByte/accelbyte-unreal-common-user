@@ -264,6 +264,11 @@ public:
 
 	UPROPERTY(BlueprintAssignable, Category=Session)
 	FOnMatchmakingTimeoutDelegate OnMatchmakingTimeoutDelegate;
+	
+	DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnMatchFoundDelegate, FString, MatchId);
+
+	UPROPERTY(BlueprintAssignable, Category=Session)
+	FOnMatchFoundDelegate OnMatchFoundDelegate;
 	// #END
 	
 	/** Starts process to join an existing session, if successful this will connect to the specified server */
@@ -336,6 +341,7 @@ protected:
 	void OnMatchmakingComplete(FName SessionName, bool bWasSuccessful);
 	void OnCancelMatchmakingComplete(FName SessionName, bool bWasSuccessful);
 	void OnMatchmakingTimeout(const FErrorInfo& Error);
+	void OnMatchFound(FString MatchId);
 	// #End
 	
 	void OnFindSessionsComplete(bool bWasSuccessful);
