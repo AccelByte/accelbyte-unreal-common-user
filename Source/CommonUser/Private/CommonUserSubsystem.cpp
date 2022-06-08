@@ -1,6 +1,9 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "CommonUserSubsystem.h"
+
+#include "OnlineIdentityInterfaceAccelByte.h"
+#include "OnlineSubsystemAccelByte.h"
 #include "Engine/GameViewportClient.h"
 #include "Engine/Engine.h"
 #include "Engine/LocalPlayer.h"
@@ -590,6 +593,11 @@ void UCommonUserSubsystem::BindOnlineDelegatesOSSv1()
 	{
 		ServiceContext->IdentityInterface->AddOnLoginStatusChangedDelegate_Handle(PlayerIdx, FOnLoginStatusChangedDelegate::CreateUObject(this, &ThisClass::HandleIdentityLoginStatusChanged, ServiceType));
 		ServiceContext->IdentityInterface->AddOnLoginCompleteDelegate_Handle(PlayerIdx, FOnLoginCompleteDelegate::CreateUObject(this, &ThisClass::HandleUserLoginCompleted, ServiceType));
+		if(ServiceContext->OnlineSubsystem->GetSubsystemName().IsEqual(TEXT("ACCELBYTE")))
+		{
+			FOnlineIdentityAccelBytePtr IdentityAccelByte = StaticCastSharedPtr<FOnlineIdentityAccelByte>(ServiceContext->IdentityInterface);
+			IdentityAccelByte->AddOnConnectLobbyCompleteDelegate_Handle(PlayerIdx, FOnConnectLobbyCompleteDelegate::CreateUObject(this, &ThisClass::HandleOnUserConnectedToLobby));
+		}
 	}
 
 	if (ServiceType != PlatformType)
@@ -1800,6 +1808,21 @@ void UCommonUserSubsystem::HandleCheckPrivilegesComplete(const FUniqueNetId& Use
 			}
 
 			ProcessLoginRequest(Request);
+		}
+	}
+}
+
+void UCommonUserSubsystem::HandleOnUserConnectedToLobby(int32 LocalUserNum, bool bWasSuccessful, const FUniqueNetId& UserId, const FString& Error)
+{
+	TArray<TSharedRef<FUserLoginRequest>> RequestsCopy = ActiveLoginRequests;
+	for (TSharedRef<FUserLoginRequest>& Request : RequestsCopy)
+	{
+		FUniqueNetIdRepl UniqueNetId = GetLocalUserNetId(Request->UserInfo->PlatformUserIndex, ECommonUserOnlineContext::Default);
+		if(UniqueNetId->ToString().Equals(UserId.ToString()))
+		{
+			Request->ConnectToLobbyState = bWasSuccessful ? ECommonUserAsyncTaskState::Done : ECommonUserAsyncTaskState::Failed;
+			ProcessLoginRequest(Request);
+			break;
 		}
 	}
 }

@@ -18,4 +18,12 @@ class ACCELBYTESOCIALTOOLKIT_API UAccelByteSocialToolkit : public USocialToolkit
 public:
 	virtual void InitializeToolkit(ULocalPlayer& InOwningLocalPlayer) override;
 	UAccelByteSocialToolkit();
+
+	DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnLobbyConnectedDelegate);
+
+	FOnLobbyConnectedDelegate OnLobbyConnectedDelegate;
+
+protected:
+	void OnCreatePartyComplete(ECreatePartyCompletionResult CreatePartyCompletionResult);
+	virtual void OnLobbyConnected(int32 LocalUserNum, bool bWasSuccessful, const FUniqueNetId& UserId, const FString& Error);
 };

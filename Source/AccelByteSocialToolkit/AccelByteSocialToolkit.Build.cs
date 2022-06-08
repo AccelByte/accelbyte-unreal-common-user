@@ -29,7 +29,7 @@ public class AccelByteSocialToolkit : ModuleRules
 				"Json",
 				"JsonUtilities",
 				"Party",
-				"OnlineSubsystem"
+				"OnlineSubsystem", "OnlineSubsystemAccelByte"
 				// ... add private dependencies that you statically link with here ...	
 			}
 			);

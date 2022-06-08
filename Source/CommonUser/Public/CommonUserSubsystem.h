@@ -441,6 +441,8 @@ protected:
 		// #START @AccelByte ImplementationManualLoginState
 		/** State of attempt to use ManualLogin */
 		ECommonUserAsyncTaskState ManualLoginState = ECommonUserAsyncTaskState::NotStarted;
+		
+		ECommonUserAsyncTaskState ConnectToLobbyState = ECommonUserAsyncTaskState::NotStarted;
 		// #END
 
 		/** Final privilege to that is requested */
@@ -547,6 +549,8 @@ protected:
 	virtual void HandleNetworkConnectionStatusChanged(const FString& ServiceName, EOnlineServerConnectionStatus::Type LastConnectionStatus, EOnlineServerConnectionStatus::Type ConnectionStatus, ECommonUserOnlineContext Context);
 	virtual void HandleOnLoginUIClosed(TSharedPtr<const FUniqueNetId> LoggedInNetId, const int PlatformUserIndex, const FOnlineError& Error, ECommonUserOnlineContext Context);
 	virtual void HandleCheckPrivilegesComplete(const FUniqueNetId& UserId, EUserPrivileges::Type Privilege, uint32 PrivilegeResults, ECommonUserPrivilege RequestedPrivilege, TWeakObjectPtr<UCommonUserInfo> CommonUserInfo, ECommonUserOnlineContext Context);
+	/** @AccelByte Implementation */
+	virtual void HandleOnUserConnectedToLobby(int32 LocalUserNum, bool bWasSuccessful, const FUniqueNetId& UserId, const FString& Error);
 #else
 	virtual void HandleAuthLoginStatusChanged(const UE::Online::FLoginStatusChanged& EventParameters, ECommonUserOnlineContext Context);
 	virtual void HandleUserLoginCompletedV2(const UE::Online::TOnlineResult<UE::Online::FAuthLogin>& Result, int32 PlatformUserIndex, ECommonUserOnlineContext Context);
