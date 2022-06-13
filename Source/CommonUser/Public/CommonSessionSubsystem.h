@@ -42,6 +42,14 @@ enum class ECommonSessionOnlineMode : uint8
 	Online
 };
 
+UENUM(BlueprintType)
+enum class ECommonSessionOnlineServerType : uint8
+{
+	NONE,
+	P2P,
+	Dedicated
+};
+
 /** A request object that stores the parameters used when hosting a gameplay session */
 UCLASS(BlueprintType)
 class COMMONUSER_API UCommonSession_HostSessionRequest : public UObject
@@ -76,6 +84,9 @@ public:
 	/** #START @AccelByte Implementation : GameMode on matchmaking service */
 	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category=Experience)
 	FString AccelByteGameMode;
+	
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category=Experience)
+	ECommonSessionOnlineServerType ServerType{ECommonSessionOnlineServerType::NONE};
 	// #END
 	
 public:
@@ -164,6 +175,9 @@ public:
 	UPROPERTY(BlueprintReadWrite, Category = Session)
 	bool bUseLobbies;
 
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category=Experience)
+	ECommonSessionOnlineServerType ServerType{ECommonSessionOnlineServerType::NONE};
+	
 	/** List of all found sessions, will be valid when OnSearchFinished is called */
 	UPROPERTY(BlueprintReadOnly, Category=Session)
 	TArray<UCommonSession_SearchResult*> Results;
@@ -244,6 +258,9 @@ public:
 	virtual void QuickPlaySession(APlayerController* JoiningOrHostingPlayer, UCommonSession_HostSessionRequest* Request);
 	
 	/** #START @AccelByte Implementation : Starts a process to matchmaking with other player. */
+	/** @brief Start Session, must manually called after Map / Experience successfully loaded */
+	virtual void StartSession();
+	
 	DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnMatchmakingStartDelegate);
 	
 	UFUNCTION(BlueprintCallable, Category=Session)

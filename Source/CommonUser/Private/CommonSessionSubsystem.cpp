@@ -3,6 +3,7 @@
 #include "CommonSessionSubsystem.h"
 
 #include "OnlineSessionInterfaceAccelByte.h"
+#include "OnlineSubsystemAccelByteDefines.h"
 #include "GameFramework/GameModeBase.h"
 #include "Engine/AssetManager.h"
 #include "Engine/Engine.h"
@@ -205,6 +206,12 @@ public:
 		{
 			QuerySettings.Set(SEARCH_PRESENCE, true, EOnlineComparisonOp::Equals);
 			QuerySettings.Set(SEARCH_LOBBIES, true, EOnlineComparisonOp::Equals);
+		}
+		if(InSearchRequest->ServerType != ECommonSessionOnlineServerType::NONE)
+		{
+			QuerySettings.Set<FString>(SETTING_SEARCH_TYPE,
+				InSearchRequest->ServerType == ECommonSessionOnlineServerType::P2P ? TEXT("p2p") : TEXT("dedicated"),
+				EOnlineComparisonOp::Equals);
 		}
 	}
 
@@ -435,6 +442,7 @@ UCommonSession_SearchSessionRequest* UCommonSessionSubsystem::CreateOnlineSearch
 	UCommonSession_SearchSessionRequest* NewRequest = NewObject<UCommonSession_SearchSessionRequest>(this);
 	NewRequest->OnlineMode = ECommonSessionOnlineMode::Online;
 	NewRequest->bUseLobbies = true;
+	NewRequest->ServerType = ECommonSessionOnlineServerType::P2P;
 
 	return NewRequest;
 }
@@ -518,6 +526,11 @@ void UCommonSessionSubsystem::CreateOnlineSessionInternalOSSv1(ULocalPlayer* Loc
 		HostSettings->Set(SETTING_MATCHING_TIMEOUT, 120.0f, EOnlineDataAdvertisementType::ViaOnlineService);
 		HostSettings->Set(SETTING_SESSION_TEMPLATE_NAME, FString(TEXT("GameSession")), EOnlineDataAdvertisementType::DontAdvertise);
 		HostSettings->Set(SETTING_ONLINESUBSYSTEM_VERSION, true, EOnlineDataAdvertisementType::ViaOnlineService);
+
+		// #START @AccelByte Implementation
+		HostSettings->Set(SETTING_ACCELBYTE_ICE_ENABLED, Request->ServerType == ECommonSessionOnlineServerType::P2P, EOnlineDataAdvertisementType::ViaOnlineService);
+		HostSettings->bIsDedicated = Request->ServerType == ECommonSessionOnlineServerType::Dedicated;
+		// #END
 
 		FSessionSettings& UserSettings = HostSettings->MemberSettings.Add(UserId.ToSharedRef(), FSessionSettings());
 		UserSettings.Add(SETTING_GAMEMODE, FOnlineSessionSetting(FString("GameSession"), EOnlineDataAdvertisementType::ViaOnlineService));
@@ -899,6 +912,21 @@ void UCommonSessionSubsystem::QuickPlaySession(APlayerController* JoiningOrHosti
 	FindSessionsInternal(JoiningOrHostingPlayer, CreateQuickPlaySearchSettings(HostRequest, QuickPlayRequest));
 }
 
+void UCommonSessionSubsystem::StartSession()
+{
+	IOnlineSessionPtr Session = Online::GetSessionInterface();
+	check(Session)
+	FName GameSession = NAME_GameSession;
+	EOnlineSessionState::Type SessionState = Session->GetSessionState(GameSession);
+	if(SessionState == EOnlineSessionState::Pending)
+	{
+		UE_LOG(LogCommonSession, Log, TEXT("UCommonSessionSubsystem::StartSession: Start session %s"), *GameSession.ToString());
+		Session->StartSession(NAME_GameSession);
+		return;
+	}
+	UE_LOG(LogCommonSession, Warning, TEXT("UCommonSessionSubsystem::StartSession: Failed to start session, session state is not Pending. Current Session State: %s"), EOnlineSessionState::ToString(SessionState));
+}
+
 /** #START @AccelByte Implementation : Starts a process to matchmaking with other player. */
 void UCommonSessionSubsystem::MatchmakingSession(APlayerController* JoiningOrHostingPlayer, UCommonSession_HostSessionRequest* HostRequest, UCommonSession_SearchSessionRequest*& OutMatchmakingSessionRequest)
 {
@@ -1102,6 +1130,11 @@ void UCommonSessionSubsystem::CleanUpSessionsOSSv1()
 	else if (EOnlineSessionState::Starting == SessionState || EOnlineSessionState::Creating == SessionState)
 	{
 		UE_LOG(LogCommonSession, Log, TEXT("Waiting for session to start, and then we will end it to return to main menu"));
+	}
+	else
+	{
+		// reset if fail to cleanup session
+		bWantToDestroyPendingSession = false;
 	}
 }
 
