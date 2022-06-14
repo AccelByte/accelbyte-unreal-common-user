@@ -30,12 +30,25 @@ void UAsyncAction_CommonSessionEndSession::HandleDestroySessionComplete(FName Na
 
 void UAsyncAction_CommonSessionEndSession::HandleOnEndSessionComplete(FName GameSession, bool bWasSuccessful)
 {
-	UE_LOG(LogTemp, Warning, TEXT("End SESSION Complete with %s"), bWasSuccessful ? TEXT("Success") : TEXT("Failed"))
+	UE_LOG(LogTemp, Warning, TEXT("END SESSION Complete with %s"), bWasSuccessful ? TEXT("Success") : TEXT("Failed"))
+	// This cases is so weird. Somehow remove session from SessionBrowser is hang and can't return anything. Not sure why
+	// But calling it again will make it work.
+	if(!bWasSuccessful)
+	{
+		IOnlineSessionPtr SessionPtr = Online::GetSessionInterface();
+		FNamedOnlineSession* Session = SessionPtr->GetNamedSession(GameSession);
+		if(SessionPtr && Session)
+		{
+			Session->SessionState = EOnlineSessionState::InProgress;
+			SessionPtr->EndSession(GameSession);
+		}
+	}
 }
 
 void UAsyncAction_CommonSessionEndSession::Activate()
 {
 	Super::Activate();
+	UE_LOG(LogTemp, Warning, TEXT("UAsyncAction_CommonSessionEndSession::Activate"))
 
 	IOnlineSessionPtr Session = Online::GetSessionInterface();
 	if(Session)

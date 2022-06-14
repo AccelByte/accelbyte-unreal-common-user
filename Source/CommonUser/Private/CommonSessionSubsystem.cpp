@@ -530,6 +530,15 @@ void UCommonSessionSubsystem::CreateOnlineSessionInternalOSSv1(ULocalPlayer* Loc
 		// #START @AccelByte Implementation
 		HostSettings->Set(SETTING_ACCELBYTE_ICE_ENABLED, Request->ServerType == ECommonSessionOnlineServerType::P2P, EOnlineDataAdvertisementType::ViaOnlineService);
 		HostSettings->bIsDedicated = Request->ServerType == ECommonSessionOnlineServerType::Dedicated;
+		FString* NumBots = Request->ExtraArgs.Find(TEXT("NumBots"));
+		if(NumBots)
+		{
+			HostSettings->Set<int>(SETTING_NUMBOTS, FCString::Atoi(**NumBots), EOnlineDataAdvertisementType::ViaOnlineService);
+		}
+		else
+		{
+			HostSettings->Set<int>(SETTING_NUMBOTS, 0, EOnlineDataAdvertisementType::ViaOnlineService);
+		}
 		// #END
 
 		FSessionSettings& UserSettings = HostSettings->MemberSettings.Add(UserId.ToSharedRef(), FSessionSettings());
