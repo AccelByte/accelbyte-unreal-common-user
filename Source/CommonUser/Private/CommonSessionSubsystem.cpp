@@ -682,6 +682,17 @@ void UCommonSessionSubsystem::OnDestroySessionComplete(FName SessionName, bool b
 // #START @AccelByte Implementation Matchmaking Handler
 void UCommonSessionSubsystem::OnMatchmakingStarted()
 {
+	if(!SearchSettings.IsValid())
+	{
+		UCommonSession_SearchSessionRequest* MatchRequest = CreateOnlineSearchSessionRequest();
+		TWeakObjectPtr<APlayerController> JoinUser = MakeWeakObjectPtr(GetGameInstance()->GetFirstLocalPlayerController());
+		UCommonSession_HostSessionRequest* HostRequest = CreateOnlineHostSessionRequest();
+		TStrongObjectPtr<UCommonSession_HostSessionRequest> HostRequestPtr = TStrongObjectPtr<UCommonSession_HostSessionRequest>(HostRequest);
+		MatchRequest->OnSearchFinished.AddUObject(this, &UCommonSessionSubsystem::HandleMatchmakingFinished, JoinUser, HostRequestPtr);
+		
+		SearchSettings = CreateMatchmakingSearchSettings(HostRequest, MatchRequest);
+	}
+	
 	OnMatchmakingStartDelegate.Broadcast();
 }
 
@@ -694,17 +705,42 @@ void UCommonSessionSubsystem::OnMatchmakingComplete(FName SessionName, bool bWas
 		// matchmaking is failed or canceled
 		return;
 	}
+
+	// For a user that don't start matchmaking (on a party), the FOnlineSessionSearch will not referenced from this class
+	// instead created by AccelByte OSS.
+	if(SearchSettings->SearchResults.Num() == 0)
+	{
+		IOnlineSubsystem* OnlineSub = Online::GetSubsystem(GetWorld());
+		check(OnlineSub);
+		IOnlineSessionPtr Sessions = OnlineSub->GetSessionInterface();
+		check(Sessions);
+		FOnlineSessionAccelBytePtr SessionAccelBytePtr = StaticCastSharedPtr<FOnlineSessionAccelByte>(Sessions);
+		check(SessionAccelBytePtr)
+		
+		TSharedPtr<FOnlineSessionSearch> SessionSearch = SessionAccelBytePtr->GetSessionSearch();
+		if(SessionSearch.IsValid())
+		{
+			if(SessionSearch->SearchResults.Num() > 0)
+			{
+				// This user is not the one who start the matchmaking
+				UE_LOG(LogCommonSession, Log, TEXT("UCommonSessionSubsystem::OnMatchmakingComplete - local user is not the one started the matchmaking!"));
+				
+				SearchSettings->SearchResults = SessionSearch->SearchResults;
+			}
+			SearchSettings->SearchState = SessionSearch->SearchState;
+		}
+	}
 	
 	FCommonOnlineSearchSettingsOSSv1& SearchSettingsV1 = *StaticCastSharedPtr<FCommonOnlineSearchSettingsOSSv1>(SearchSettings);
 	if (SearchSettingsV1.SearchState == EOnlineAsyncTaskState::InProgress)
 	{
-		UE_LOG(LogCommonSession, Error, TEXT("OnFindSessionsComplete called when search is still in progress!"));
+		UE_LOG(LogCommonSession, Error, TEXT("OnMatchmakingComplete called when search is still in progress!"));
 		return;
 	}
 
 	if (!ensure(SearchSettingsV1.SearchRequest))
 	{
-		UE_LOG(LogCommonSession, Error, TEXT("OnFindSessionsComplete called with invalid search request object!"));
+		UE_LOG(LogCommonSession, Error, TEXT("OnMatchmakingComplete called with invalid search request object!"));
 		return;
 	}
 
