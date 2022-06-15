@@ -4,6 +4,8 @@
 
 #include "AccelByteSocialToolkitModule.h"
 
+DEFINE_LOG_CATEGORY(LogAccelByteToolkit);
+
 #define LOCTEXT_NAMESPACE "FAccelByteSocialToolkitModule"
 
 void FAccelByteSocialToolkitModule::StartupModule()

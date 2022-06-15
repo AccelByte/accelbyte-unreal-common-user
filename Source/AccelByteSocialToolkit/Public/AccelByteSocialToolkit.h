@@ -8,8 +8,6 @@
 #include "SocialToolkit.h"
 #include "AccelByteSocialToolkit.generated.h"
 
-DECLARE_LOG_CATEGORY_CLASS(LogAccelByteToolkit, Log, All);
-
 /**
  * 
  */

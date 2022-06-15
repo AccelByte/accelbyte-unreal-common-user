@@ -7,6 +7,8 @@
 #include "CoreMinimal.h"
 #include "Modules/ModuleManager.h"
 
+ACCELBYTESOCIALTOOLKIT_API DECLARE_LOG_CATEGORY_EXTERN(LogAccelByteToolkit, Display, All);
+
 class FAccelByteSocialToolkitModule : public IModuleInterface
 {
 public:

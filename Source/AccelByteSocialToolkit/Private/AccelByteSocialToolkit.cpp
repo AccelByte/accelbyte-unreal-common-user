@@ -6,8 +6,10 @@
 #include "AccelByteSocialToolkit.h"
 
 #include "AccelByteSocialManager.h"
+#include "AccelByteSocialToolkitModule.h"
 #include "OnlineSubsystemAccelByte.h"
 #include "OnlineIdentityInterfaceAccelByte.h"
+#include "OnlinePartyInterfaceAccelByte.h"
 
 void UAccelByteSocialToolkit::InitializeToolkit(ULocalPlayer& InOwningLocalPlayer)
 {
@@ -35,15 +37,12 @@ void UAccelByteSocialToolkit::OnCreatePartyComplete(ECreatePartyCompletionResult
 {
 	UE_LOG(LogAccelByteToolkit, Log, TEXT("Party Creation Succeed!"));
 }
+
 void UAccelByteSocialToolkit::OnLobbyConnected(int32 LocalUserNum, bool bWasSuccessful, const FUniqueNetId& UserId,
 	const FString& Error)
 {
 	if (IsOwnerLoggedIn())
 	{
-		// Re-call again, Friends functionality only works when lobby is connected.
-		//OnOwnerLoggedIn(); // this function is also binding, not sure if we should call this
-
-		// alternative
 		QueryFriendsLists();
 		QueryBlockedPlayers();
 		QueryRecentPlayers();
@@ -52,7 +51,13 @@ void UAccelByteSocialToolkit::OnLobbyConnected(int32 LocalUserNum, bool bWasSucc
 		GConfig->GetBool(TEXT("AccelByteSocialToolkit"), TEXT("bAutoCreateParty"), bAutoCreateParty, GEngineIni);
 		if(bAutoCreateParty)
 		{
-			GetSocialManager().CreatePersistentParty();
+			FPartyConfiguration Config;
+			Config.bIsAcceptingMembers = true;
+			GetSocialManager().CreateParty(
+				FOnlinePartySystemAccelByte::GetAccelBytePartyTypeId(),
+				Config,
+				USocialManager::FOnCreatePartyAttemptComplete::CreateUObject(this, &ThisClass::OnCreatePartyComplete)
+			);
 		}
 	}
 	
