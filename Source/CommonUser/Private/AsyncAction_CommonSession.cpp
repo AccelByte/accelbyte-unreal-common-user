@@ -53,9 +53,19 @@ void UAsyncAction_CommonSessionEndSession::Activate()
 	IOnlineSessionPtr Session = Online::GetSessionInterface();
 	if(Session)
 	{
-		Session->AddOnDestroySessionCompleteDelegate_Handle(FOnDestroySessionCompleteDelegate::CreateUObject(this, &ThisClass::HandleDestroySessionComplete));
-		Session->AddOnEndSessionCompleteDelegate_Handle(FOnEndSessionCompleteDelegate::CreateUObject(this, &ThisClass::HandleOnEndSessionComplete));
-		CommonSession->CleanUpSessions();
+		EOnlineSessionState::Type SessionState = Session->GetSessionState(NAME_GameSession);
+		if(SessionState == EOnlineSessionState::NoSession)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("No Session available!"))
+			OnComplete.Broadcast(false);
+			SetReadyToDestroy();
+		}
+		else
+		{
+			Session->AddOnDestroySessionCompleteDelegate_Handle(FOnDestroySessionCompleteDelegate::CreateUObject(this, &ThisClass::HandleDestroySessionComplete));
+			Session->AddOnEndSessionCompleteDelegate_Handle(FOnEndSessionCompleteDelegate::CreateUObject(this, &ThisClass::HandleOnEndSessionComplete));
+			CommonSession->CleanUpSessions();
+		}
 	}
 	else
 	{
