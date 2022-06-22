@@ -53,6 +53,11 @@ void UAccelByteSocialToolkit::OnLobbyConnected(int32 LocalUserNum, bool bWasSucc
 		{
 			FPartyConfiguration Config;
 			Config.bIsAcceptingMembers = true;
+
+			int32 MaxPartyMembers = 0;
+			GConfig->GetInt(TEXT("AccelByteSocialToolkit"), TEXT("MaxPartyMembers"), MaxPartyMembers, GEngineIni);
+			Config.MaxMembers = MaxPartyMembers;
+
 			GetSocialManager().CreateParty(
 				FOnlinePartySystemAccelByte::GetAccelBytePartyTypeId(),
 				Config,
@@ -62,4 +67,12 @@ void UAccelByteSocialToolkit::OnLobbyConnected(int32 LocalUserNum, bool bWasSucc
 	}
 	
 	OnLobbyConnectedDelegate.Broadcast();
+}
+
+void UAccelByteSocialToolkit::OnOwnerLoggedOut()
+{
+	Super::OnOwnerLoggedOut();
+
+	UE_LOG(LogAccelByteToolkit, Log, TEXT("Local User logged out"));
+	GEngine->SetClientTravel(GetWorld(), *FString("L_LyraFrontEnd"), ETravelType::TRAVEL_Absolute);
 }

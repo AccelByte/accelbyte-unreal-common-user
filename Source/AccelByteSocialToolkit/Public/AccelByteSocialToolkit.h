@@ -26,4 +26,6 @@ public:
 protected:
 	void OnCreatePartyComplete(ECreatePartyCompletionResult CreatePartyCompletionResult);
 	virtual void OnLobbyConnected(int32 LocalUserNum, bool bWasSuccessful, const FUniqueNetId& UserId, const FString& Error);
+
+	virtual void OnOwnerLoggedOut() override;
 };
