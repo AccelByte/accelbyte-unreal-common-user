@@ -142,6 +142,9 @@ public:
 	UFUNCTION(BlueprintPure, Category=Sessions)
 	int32 GetPingInMs() const;
 
+	UFUNCTION(BlueprintCallable, Category=Sessions)
+	FString GetUsername() const;
+
 public:
 	/** Pointer to the platform-specific implementation */
 #if COMMONUSER_OSSV1

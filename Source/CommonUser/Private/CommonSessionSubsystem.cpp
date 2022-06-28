@@ -79,6 +79,11 @@ int32 UCommonSession_SearchResult::GetPingInMs() const
 {
 	return Result.PingInMs;
 }
+
+FString UCommonSession_SearchResult::GetUsername() const
+{
+	return Result.Session.OwningUserName;
+}
 #else
 FString UCommonSession_SearchResult::GetDescription() const
 {
