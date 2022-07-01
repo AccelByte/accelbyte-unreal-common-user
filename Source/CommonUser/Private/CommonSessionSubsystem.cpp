@@ -84,6 +84,13 @@ FString UCommonSession_SearchResult::GetUsername() const
 {
 	return Result.Session.OwningUserName;
 }
+
+FString UCommonSession_SearchResult::GetOwningAccelByteIdString() const
+{
+	const TSharedRef<const FUniqueNetIdAccelByteUser> ABUser = FUniqueNetIdAccelByteUser::Cast(*Result.Session.OwningUserId);
+	return ABUser->GetAccelByteId();
+}
+
 #else
 FString UCommonSession_SearchResult::GetDescription() const
 {
@@ -610,6 +617,11 @@ void UCommonSessionSubsystem::CreateOnlineSessionInternalOSSv2(ULocalPlayer* Loc
 void UCommonSessionSubsystem::OnCreateSessionComplete(FName SessionName, bool bWasSuccessful)
 {
 	UE_LOG(LogCommonSession, Log, TEXT("OnCreateSessionComplete(SessionName: %s, bWasSuccessful: %d)"), *SessionName.ToString(), bWasSuccessful);
+
+	if (bWasSuccessful)
+	{
+		OnSessionCreatedDelegate.Broadcast();
+	}
 
 #if COMMONUSER_OSSV1 // OSSv2 joins splitscreen players as part of the create call
 	// Add the splitscreen player if one exists

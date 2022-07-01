@@ -145,6 +145,9 @@ public:
 	UFUNCTION(BlueprintCallable, Category=Sessions)
 	FString GetUsername() const;
 
+	UFUNCTION(BlueprintCallable, Category=Sessions)
+	FString GetOwningAccelByteIdString() const;
+
 public:
 	/** Pointer to the platform-specific implementation */
 #if COMMONUSER_OSSV1
@@ -302,6 +305,11 @@ public:
 	/** Clean up any active sessions, called from cases like returning to the main menu */
 	UFUNCTION(BlueprintCallable, Category=Session)
 	virtual void CleanUpSessions();
+
+	DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnSessionCreatedDelegate);
+
+	UPROPERTY(BlueprintAssignable, Category=Session)
+	FOnSessionCreatedDelegate OnSessionCreatedDelegate;
 
 protected:
 	// Functions called during the process of creating or joining a session, these can be overidden for game-specific behavior
