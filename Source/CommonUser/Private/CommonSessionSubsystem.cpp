@@ -1064,6 +1064,22 @@ TSharedRef<FCommonOnlineSearchSettings> UCommonSessionSubsystem::CreateQuickPlay
 TSharedRef<FCommonOnlineSearchSettings> UCommonSessionSubsystem::CreateMatchmakingSearchSettings(
 	UCommonSession_HostSessionRequest* Request, UCommonSession_SearchSessionRequest* SearchRequest)
 {
+	// Allow to override client version
+	FString CmdArgs = FCommandLine::Get();
+	FString ClientVersion;
+	FParse::Value(FCommandLine::Get(), TEXT("ClientVersion="), ClientVersion);
+	if(ClientVersion.IsEmpty())
+	{
+		GConfig->GetString(
+			TEXT("/Script/EngineSettings.GeneralProjectSettings"),
+			TEXT("ProjectVersion"),
+			ClientVersion,
+			GGameIni
+		);
+		CmdArgs.Append(*FString::Printf(TEXT(" -ClientVersion=%s"), *ClientVersion));
+		FCommandLine::Set(*CmdArgs);
+	}
+	
 	TSharedRef<FCommonOnlineSearchSettingsOSSv1> MatchmakingSearch = MakeShared<FCommonOnlineSearchSettingsOSSv1>(SearchRequest);
 
 	MatchmakingSearch->QuerySettings.Set(SETTING_GAMEMODE, Request->AccelByteGameMode, EOnlineComparisonOp::Equals);
