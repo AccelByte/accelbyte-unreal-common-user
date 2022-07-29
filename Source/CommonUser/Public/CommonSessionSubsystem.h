@@ -247,6 +247,11 @@ public:
 	virtual void Deinitialize() override;
 	virtual bool ShouldCreateSubsystem(UObject* Outer) const override;
 
+	/** #START @AccelByte Implementation : Prevent host from travelling */
+	/** Get whether current local user is in any session or not */
+	bool IsLocalPlayerInSession() const;
+	// #END
+
 	/** Creates a host session request with default options for online games, this can be modified after creation */
 	UFUNCTION(BlueprintCallable, Category = Session)
 	virtual UCommonSession_HostSessionRequest* CreateOnlineHostSessionRequest();
@@ -292,6 +297,11 @@ public:
 
 	UPROPERTY(BlueprintAssignable, Category=Session)
 	FOnMatchFoundDelegate OnMatchFoundDelegate;
+	// #END
+
+	/** #START @AccelByte Implementation : attach extra argument to client travel URL*/
+	UPROPERTY(BlueprintReadWrite, Category=Session)
+	TMap<FString, FString> ClientExtraArgs;
 	// #END
 	
 	/** Starts process to join an existing session, if successful this will connect to the specified server */

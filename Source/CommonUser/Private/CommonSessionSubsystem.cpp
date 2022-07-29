@@ -436,6 +436,20 @@ bool UCommonSessionSubsystem::ShouldCreateSubsystem(UObject* Outer) const
 	return ChildClasses.Num() == 0;
 }
 
+bool UCommonSessionSubsystem::IsLocalPlayerInSession() const
+{
+	const IOnlineSubsystem* OnlineSub = Online::GetSubsystem(GetWorld());
+	check(OnlineSub);
+
+	const IOnlineSessionPtr Sessions = OnlineSub->GetSessionInterface();
+	check(Sessions.IsValid());
+
+	const IOnlineIdentityPtr OnlineIdentity = OnlineSub->GetIdentityInterface();
+	check(OnlineIdentity.IsValid());
+
+	return Sessions->IsPlayerInSession(NAME_GameSession, *OnlineIdentity->GetUniquePlayerId(0).Get());
+}
+
 UCommonSession_HostSessionRequest* UCommonSessionSubsystem::CreateOnlineHostSessionRequest()
 {
 	/** Game-specific subsystems can override this or you can modify after creation */
@@ -1379,7 +1393,14 @@ void UCommonSessionSubsystem::FinishJoinSession(EOnJoinSessionCompleteResult::Ty
 {
 	if (Result == EOnJoinSessionCompleteResult::Success)
 	{
-		InternalTravelToSession(NAME_GameSession);
+		/*
+		 * when the current session is previously joining other's session. This will also
+		 * be called on the host side. This check is workaround to prevent travel for the current host.
+		 */
+		if (!IsLocalPlayerInSession())
+		{
+			InternalTravelToSession(NAME_GameSession);
+		}
 	}
 	else
 	{
@@ -1518,6 +1539,16 @@ void UCommonSessionSubsystem::InternalTravelToSession(const FName SessionName)
 	// #START @AccelByte Implementation : Add options for the prefered map, it will load the map on the server after first player join.
 	//URL.Append(TEXT("?preferedMap=%s"), *SearchSettings->);
 	// #END
+
+	// #START @AccelByte Implementation : Add options for the assigned team for this player
+	for (TTuple<FString, FString> ClientExtraArg : ClientExtraArgs)
+	{
+		URL.Append(FString::Printf(TEXT("?%s=%s"), *ClientExtraArg.Key, *ClientExtraArg.Value));
+	}
+	// reset ClientExtraArgs
+	ClientExtraArgs.Empty();
+	// #END
+
 	PlayerController->ClientTravel(URL, TRAVEL_Absolute);
 }
 
