@@ -806,6 +806,7 @@ void UCommonSessionSubsystem::OnMatchmakingTimeout(const FErrorInfo& Error)
 {
 	UE_LOG(LogCommonSession, Log, TEXT("OnMatchmakingTimeoutDelegate"));
 
+	SearchSettings.Reset();
 	OnMatchmakingTimeoutDelegate.Broadcast(Error);
 	CleanUpSessions();
 }
