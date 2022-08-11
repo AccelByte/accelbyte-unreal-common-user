@@ -436,7 +436,7 @@ bool UCommonSessionSubsystem::ShouldCreateSubsystem(UObject* Outer) const
 	return ChildClasses.Num() == 0;
 }
 
-bool UCommonSessionSubsystem::IsLocalPlayerInSession() const
+bool UCommonSessionSubsystem::IsLocalPlayerHostingSession() const
 {
 	const IOnlineSubsystem* OnlineSub = Online::GetSubsystem(GetWorld());
 	check(OnlineSub);
@@ -447,7 +447,8 @@ bool UCommonSessionSubsystem::IsLocalPlayerInSession() const
 	const IOnlineIdentityPtr OnlineIdentity = OnlineSub->GetIdentityInterface();
 	check(OnlineIdentity.IsValid());
 
-	return Sessions->IsPlayerInSession(NAME_GameSession, *OnlineIdentity->GetUniquePlayerId(0).Get());
+	const FNamedOnlineSession* Session = Sessions->GetNamedSession(NAME_GameSession);
+	return Session->bHosting;
 }
 
 UCommonSession_HostSessionRequest* UCommonSessionSubsystem::CreateOnlineHostSessionRequest()
@@ -1398,7 +1399,7 @@ void UCommonSessionSubsystem::FinishJoinSession(EOnJoinSessionCompleteResult::Ty
 		 * when the current session is previously joining other's session. This will also
 		 * be called on the host side. This check is workaround to prevent travel for the current host.
 		 */
-		if (!IsLocalPlayerInSession())
+		if (!IsLocalPlayerHostingSession())
 		{
 			InternalTravelToSession(NAME_GameSession);
 		}

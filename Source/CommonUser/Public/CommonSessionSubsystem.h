@@ -248,8 +248,8 @@ public:
 	virtual bool ShouldCreateSubsystem(UObject* Outer) const override;
 
 	/** #START @AccelByte Implementation : Prevent host from travelling */
-	/** Get whether current local user is in any session or not */
-	bool IsLocalPlayerInSession() const;
+	/** Get whether current local user is hosting a session or not */
+	bool IsLocalPlayerHostingSession() const;
 	// #END
 
 	/** Creates a host session request with default options for online games, this can be modified after creation */
