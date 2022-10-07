@@ -2,8 +2,11 @@
 
 #include "CommonSessionSubsystem.h"
 
-#include "OnlineSessionInterfaceAccelByte.h"
+#include <OnlineSessionInterfaceV1AccelByte.h>
+
+#include "OnlineSubsystemAccelByte.h"
 #include "OnlineSubsystemAccelByteDefines.h"
+#include "OnlineSubsystemAccelByteTypes.h"
 #include "GameFramework/GameModeBase.h"
 #include "Engine/AssetManager.h"
 #include "Engine/Engine.h"
@@ -362,7 +365,7 @@ void UCommonSessionSubsystem::BindOnlineDelegatesOSSv1()
 	if(OnlineSub->GetSubsystemName().IsEqual(TEXT("AccelByte"), ENameCase::IgnoreCase))
 	{
 		// Subscribe Start matchmaking notif
-		FOnlineSessionAccelBytePtr SessionAccelBytePtr = StaticCastSharedPtr<FOnlineSessionAccelByte>(SessionInterface);
+		FOnlineSessionAccelBytePtr SessionAccelBytePtr = StaticCastSharedPtr<FOnlineSessionV1AccelByte>(SessionInterface);
 		SessionAccelBytePtr->AddOnMatchmakingStartedDelegate_Handle(FOnMatchmakingStartedDelegate::CreateUObject(this, &ThisClass::OnMatchmakingStarted));
 		SessionAccelBytePtr->AddOnMatchmakingFailedDelegate_Handle(FOnMatchmakingFailedDelegate::CreateUObject(this, &ThisClass::OnMatchmakingTimeout));
 		SessionAccelBytePtr->AddOnReadyConsentRequestedDelegate_Handle(FOnReadyConsentRequestedDelegate::CreateUObject(this, &ThisClass::OnMatchFound));
@@ -746,7 +749,7 @@ void UCommonSessionSubsystem::OnMatchmakingComplete(FName SessionName, bool bWas
 		check(OnlineSub);
 		IOnlineSessionPtr Sessions = OnlineSub->GetSessionInterface();
 		check(Sessions);
-		FOnlineSessionAccelBytePtr SessionAccelBytePtr = StaticCastSharedPtr<FOnlineSessionAccelByte>(Sessions);
+		FOnlineSessionAccelBytePtr SessionAccelBytePtr = StaticCastSharedPtr<FOnlineSessionV1AccelByte>(Sessions);
 		check(SessionAccelBytePtr)
 		
 		TSharedPtr<FOnlineSessionSearch> SessionSearch = SessionAccelBytePtr->GetSessionSearch();
