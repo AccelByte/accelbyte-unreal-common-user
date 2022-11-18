@@ -5,10 +5,12 @@
 #include "CoreMinimal.h"
 #include "Core/AccelByteError.h"
 #include "Engine/GameInstance.h"
+#include "OnlineUserInterfaceAccelByte.h"
 #include "Subsystems/GameInstanceSubsystem.h"
 #include "UObject/StrongObjectPtr.h"
 
 #if COMMONUSER_OSSV1
+#include "OnlineSubsystemAccelByte.h"
 #include "OnlineSubsystemTypes.h"
 #include "Interfaces/OnlineSessionInterface.h"
 #include "Public/OnlineSessionSettings.h"
@@ -29,6 +31,15 @@ class FCommonOnlineSearchSettingsOSSv2;
 using FCommonOnlineSearchSettings = FCommonOnlineSearchSettingsOSSv2;
 #endif // COMMONUSER_OSSV1
 
+#if COMMONUSER_OSSV1
+// #SESSIONv2 Define custom session settings
+#define SETTING_HOSTNAME FName(TEXT("HOSTNAME"))
+#define SETTING_SESSIONNAME FName(TEXT("SESSIONNAME"))
+#define SETTING_LOCALADDRESS FName(TEXT("LOCALADDRESS"))
+
+#define SETTING_BOTSENABLED FName(TEXT("BOTSENABLED"))
+#define SETTING_SESSION_SERVER_CONNECT_READY FName(TEXT("SERVERCONNECTREADY"))
+#endif
 
 //////////////////////////////////////////////////////////////////////
 // UCommonSession_HostSessionRequest
@@ -45,9 +56,74 @@ enum class ECommonSessionOnlineMode : uint8
 UENUM(BlueprintType)
 enum class ECommonSessionOnlineServerType : uint8
 {
-	NONE,
-	P2P,
-	Dedicated
+	NONE UMETA(Hidden),
+	P2P UMETA(DisplayName = "P2P"),
+	Dedicated UMETA(DisplayName = "DS")
+};
+
+UENUM(BlueprintType)
+enum class ECommonSessionTeamChangeDirection : uint8
+{
+	NEXT,
+	PREVIOUS
+};
+
+USTRUCT(BlueprintType)
+struct FCommonSessionOnlineUser
+{
+	GENERATED_BODY()
+
+	UPROPERTY(BlueprintReadOnly)
+	FUniqueNetIdRepl UserId;
+
+	UPROPERTY(BlueprintReadOnly)
+	FString DisplayName;
+
+	FCommonSessionOnlineUser() {}
+
+	FCommonSessionOnlineUser(const FUniqueNetIdRepl UserId, const FString& DisplayName) :
+		UserId(UserId),
+		DisplayName(DisplayName)
+	{}
+};
+
+USTRUCT(BlueprintType)
+struct FCommonSessionMember
+{
+	GENERATED_BODY()
+
+	UPROPERTY(BlueprintReadOnly)
+	FCommonSessionOnlineUser UserInfo;
+
+	UPROPERTY(BlueprintReadOnly)
+	bool bIsLeader = false;
+
+	UPROPERTY(BlueprintReadOnly)
+	bool bIsLocalUser = false;
+
+	FCommonSessionMember() {}
+
+	FCommonSessionMember(
+		const FUniqueNetIdRepl UserId,
+		const FString& DisplayName,
+		bool bInIsLeader,
+		bool bInIsLocalUser
+	) :
+		UserInfo(UserId, DisplayName),
+		bIsLeader(bInIsLeader),
+		bIsLocalUser(bInIsLocalUser)
+	{}
+};
+
+USTRUCT(BlueprintType)
+struct FCommonSessionTeam
+{
+	GENERATED_BODY();
+
+	UPROPERTY(BlueprintReadOnly)
+	TArray<FCommonSessionMember> Members;
+
+	FCommonSessionTeam() {} 
 };
 
 /** A request object that stores the parameters used when hosting a gameplay session */
@@ -83,12 +159,12 @@ public:
 
 	/** #START @AccelByte Implementation : GameMode on matchmaking service */
 	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category=Experience)
-	FString AccelByteGameMode;
-	
+	FString MatchPool;
+
 	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category=Experience)
 	ECommonSessionOnlineServerType ServerType{ECommonSessionOnlineServerType::NONE};
 	// #END
-	
+
 public:
 	/** Returns the maximum players that should actually be used, could be overridden in child classes */
 	virtual int32 GetMaxPlayers() const;
@@ -183,7 +259,7 @@ public:
 
 	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category=Experience)
 	ECommonSessionOnlineServerType ServerType{ECommonSessionOnlineServerType::NONE};
-	
+
 	/** List of all found sessions, will be valid when OnSearchFinished is called */
 	UPROPERTY(BlueprintReadOnly, Category=Session)
 	TArray<UCommonSession_SearchResult*> Results;
@@ -205,6 +281,8 @@ private:
 /** Delegates called when a matchmaking session completes */
 DECLARE_MULTICAST_DELEGATE_TwoParams(FCommonSession_MatchmakingSessionsFinished, bool bSucceeded, const FText& ErrorMessage);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FCommonSession_MatchmakingSessionsFinishedDynamic, bool, bSucceeded, FText, ErrorMessage);
+
+DECLARE_DELEGATE_OneParam(FOnCustomSessionUpdateComplete, bool bWasSuccessful);
 
 /** Request object describing a matcmaking session, this object will be updated once the search has completed */
 UCLASS(BlueprintType)
@@ -247,11 +325,6 @@ public:
 	virtual void Deinitialize() override;
 	virtual bool ShouldCreateSubsystem(UObject* Outer) const override;
 
-	/** #START @AccelByte Implementation : Prevent host from travelling */
-	/** Get whether current local user is hosting a session or not */
-	bool IsLocalPlayerHostingSession() const;
-	// #END
-
 	/** Creates a host session request with default options for online games, this can be modified after creation */
 	UFUNCTION(BlueprintCallable, Category = Session)
 	virtual UCommonSession_HostSessionRequest* CreateOnlineHostSessionRequest();
@@ -267,43 +340,75 @@ public:
 	/** Starts a process to look for existing sessions or create a new one if no viable sessions are found */
 	UFUNCTION(BlueprintCallable, Category=Session)
 	virtual void QuickPlaySession(APlayerController* JoiningOrHostingPlayer, UCommonSession_HostSessionRequest* Request);
-	
+
 	/** #START @AccelByte Implementation : Starts a process to matchmaking with other player. */
 	/** @brief Start Session, must manually called after Map / Experience successfully loaded */
 	virtual void StartSession();
-	
+
+	DECLARE_DYNAMIC_DELEGATE_OneParam(FOnHostCustomSessionComplete, bool, bWasSuccessful);
+
+	/** Creates a new custom session */
+	UFUNCTION(BlueprintCallable, Category=Session)
+	virtual void HostCustomSession(APlayerController* HostingPlayer, const FOnHostCustomSessionComplete& OnHostCustomSessionComplete);
+
+	UFUNCTION(BlueprintCallable, Category=Session)
+	virtual void StartCustomSession(APlayerController* RequestingPlayer, const FOnHostCustomSessionComplete& OnComplete);
+
+	UFUNCTION(BlueprintCallable, Category = Session)
+	virtual bool IsCustomSession(APlayerController* RequestingPlayer);
+
 	DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnMatchmakingStartDelegate);
-	
+
 	UFUNCTION(BlueprintCallable, Category=Session)
 	virtual void MatchmakingSession(APlayerController* JoiningOrHostingPlayer, UCommonSession_HostSessionRequest* HostRequest, UCommonSession_SearchSessionRequest*& OutMatchmakingSessionRequest);
-	
+
 	UPROPERTY(BlueprintAssignable, Category=Session)
 	FOnMatchmakingStartDelegate OnMatchmakingStartDelegate;
 	
-	DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnMatchmakingCanceledDelegate);
-	
+	DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnMatchmakingCancelDelegate);
+
 	UFUNCTION(BlueprintCallable, Category=Session)
 	virtual void CancelMatchmakingSession(APlayerController* CancelPlayer);
 
 	UPROPERTY(BlueprintAssignable, Category=Session)
-	FOnMatchmakingCanceledDelegate OnMatchmakingCanceledDelegate;
+	FOnMatchmakingCancelDelegate OnMatchmakingCancelDelegate;
 	
 	DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnMatchmakingTimeoutDelegate, const FErrorInfo&, Error);
 
 	UPROPERTY(BlueprintAssignable, Category=Session)
 	FOnMatchmakingTimeoutDelegate OnMatchmakingTimeoutDelegate;
-	
+
 	DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnMatchFoundDelegate, FString, MatchId);
 
 	UPROPERTY(BlueprintAssignable, Category=Session)
 	FOnMatchFoundDelegate OnMatchFoundDelegate;
+
+	// Custom sessions
+	DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnSessionUpdatedDelegate);
+
+	UPROPERTY(BlueprintAssignable, Category=Session)
+	FOnSessionUpdatedDelegate OnSessionChangedDelegate;
+
+	UPROPERTY(BlueprintAssignable, Category=Session)
+	FOnSessionUpdatedDelegate OnSessionJoinedDelegate;
+
+	DECLARE_DYNAMIC_DELEGATE_OneParam(FOnGetSessionTeamsCompleteDelegate, const TArray<FCommonSessionTeam>&, Teams);
+
+	UFUNCTION(BlueprintCallable, Category=Session)
+	virtual void GetSessionTeams(const APlayerController* QueryingPlayer, const FOnGetSessionTeamsCompleteDelegate& OnComplete);
+
+	UFUNCTION(BlueprintCallable, Category=Session)
+	virtual bool IsLocalUserLeader(const APlayerController* QueryingPlayer);
+
+	/*UFUNCTION(BlueprintCallable, Category=Session)
+	virtual void JoinLeaderIfStarted(APlayerController* JoiningPlayer);*/
+
+	DECLARE_DYNAMIC_DELEGATE_OneParam(FOnAddPlayerToTeamComplete, bool, bWasSuccessful);
+	
+	UFUNCTION(BlueprintCallable, Category=Session)
+	virtual void AddPlayerToCustomGameSessionTeam(const APlayerController* Player, const FOnAddPlayerToTeamComplete& OnComplete);
 	// #END
 
-	/** #START @AccelByte Implementation : attach extra argument to client travel URL*/
-	UPROPERTY(BlueprintReadWrite, Category=Session)
-	TMap<FString, FString> ClientExtraArgs;
-	// #END
-	
 	/** Starts process to join an existing session, if successful this will connect to the specified server */
 	UFUNCTION(BlueprintCallable, Category=Session)
 	virtual void JoinSession(APlayerController* JoiningPlayer, UCommonSession_SearchResult* Request);
@@ -316,7 +421,42 @@ public:
 	UFUNCTION(BlueprintCallable, Category=Session)
 	virtual void CleanUpSessions();
 
+	DECLARE_DYNAMIC_DELEGATE_OneParam(FOnLeaveCurrentGameSession, bool, bWasSuccessful);
+
+	/** Leave and destroy the current game session, used for custom games during lobby */
+	UFUNCTION(BlueprintCallable, Category=Session)
+	virtual void LeaveCurrentGameSession(APlayerController* LeavingPlayer, const FOnLeaveCurrentGameSession& OnLeaveComplete);
+
+	DECLARE_DYNAMIC_DELEGATE_OneParam(FOnSetCustomGameSettingComplete, bool, bWasSuccessful);
+
+	/** Set the current network mode for the custom game session to be the value passed in */
+	UFUNCTION(BlueprintCallable, Category = Session)
+	virtual void SetCustomGameSessionNetworkMode(APlayerController* UpdatingPlayer, const ECommonSessionOnlineServerType& NetworkMode, const FOnSetCustomGameSettingComplete& OnSettingUpdateComplete);
+
+	/** Set whether this game session has bots enabled or not */
+	UFUNCTION(BlueprintCallable, Category = Session)
+	virtual void SetCustomGameSessionBotsEnabled(APlayerController* UpdatingPlayer, bool bBotsEnabled, const FOnSetCustomGameSettingComplete& OnSettingUpdateComplete);
+
+	/** Set the map selection for this custom game session */
+	UFUNCTION(BlueprintCallable, Category = Session)
+	virtual void SetCustomGameSessionMap(const FPrimaryAssetId& MapId, const FName& ExperienceAssetName, const FString& ExperienceName, const FOnSetCustomGameSettingComplete& OnComplete);
+
+	UFUNCTION(BlueprintCallable, Category = Session)
+	virtual FString GetCustomGameSessionNetworkModeString(APlayerController* QueryingPlayer);
+
+	UFUNCTION(BlueprintCallable, Category = Session)
+	virtual FString GetCustomGameSessionBotsEnabledString(APlayerController* QueryingPlayer);
+
+	UFUNCTION(BlueprintCallable, Category = Session)
+	virtual FString GetCustomGameSessionMapNameString(APlayerController* QueryingPlayer);
+
+	UFUNCTION(BlueprintCallable, Category = Session)
+	virtual void ChangeCustomSessionTeam(APlayerController* UpdatingPlayer, const ECommonSessionTeamChangeDirection& Direction, const FOnSetCustomGameSettingComplete& OnTeamChangeComplete);
+
 	DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnSessionCreatedDelegate);
+
+	UFUNCTION(BlueprintCallable, Category=Session)
+	virtual void InviteToCustomSession(const APlayerController* SendingPlayer, const FUniqueNetIdRepl ReceivingPlayerId);
 
 	UPROPERTY(BlueprintAssignable, Category=Session)
 	FOnSessionCreatedDelegate OnSessionCreatedDelegate;
@@ -330,14 +470,14 @@ protected:
 	// #START @AccelByte Implementation
 	virtual TSharedRef<FCommonOnlineSearchSettings> CreateMatchmakingSearchSettings(UCommonSession_HostSessionRequest* Request, UCommonSession_SearchSessionRequest* SearchRequest);
 	// #END
-	
+
 	/** Called when a quick play search finishes, can be overridden for game-specific behavior */
 	virtual void HandleQuickPlaySearchFinished(bool bSucceeded, const FText& ErrorMessage, TWeakObjectPtr<APlayerController> JoiningOrHostingPlayer, TStrongObjectPtr<UCommonSession_HostSessionRequest> HostRequest);
 
 	// #START @AccelByte Implementation HandleMatchmaking Finished
 	virtual void HandleMatchmakingFinished(bool bSucceeded, const FText& ErrorMessage, TWeakObjectPtr<APlayerController> JoiningOrHostingPlayer, TStrongObjectPtr<UCommonSession_HostSessionRequest> HostRequest);
 	// #END
-	
+
 	/** Called when traveling to a session fails */
 	virtual void TravelLocalSessionFailure(UWorld* World, ETravelFailure::Type FailureType, const FString& ReasonString);
 
@@ -356,14 +496,28 @@ protected:
 	void BindOnlineDelegates();
 	void CreateOnlineSessionInternal(ULocalPlayer* LocalPlayer, UCommonSession_HostSessionRequest* Request);
 	void FindSessionsInternal(APlayerController* SearchingPlayer, const TSharedRef<FCommonOnlineSearchSettings>& InSearchSettings);
-	void JoinSessionInternal(ULocalPlayer* LocalPlayer, UCommonSession_SearchResult* Request);
+	void JoinSessionInternal(APlayerController* JoiningPlayer, UCommonSession_SearchResult* Request);
 	void InternalTravelToSession(const FName SessionName);
 
 #if COMMONUSER_OSSV1
+	// #START #SESSIONv2 @AccelByte SessionV2
+	void OnStartMatchmakingComplete(FName SessionName, const FOnlineError& ErrorDetails, const FSessionMatchmakingResults& Results);
+	void OnDestroySessionForJoinComplete(FName SessionName, bool bWasSuccessful, UCommonSession_SearchResult* Request, APlayerController* JoiningPlayer);
+	void OnSessionServerUpdate(FName SessionName);
+	void OnServerReceivedSession(FName SessionName);
+	FDelegateHandle QuerySessionsCompleteDelegateHandle{};
+	FDelegateHandle SessionServerUpdateDelegateHandle{};
+	FDelegateHandle ServerReceivedSessionDelegateHandle{};
+	FDelegateHandle CreateSessionDelegateHandle{};
+	FDelegateHandle JoinSessionDelegateHandle{};
+	TSharedPtr<FOnlineSessionSearch> CurrentMatchmakingSearchHandle{ nullptr };
+	TSharedPtr<FOnlineSessionSearch> CurrentQuerySessionsHandle{ nullptr };
+	// #End
+
 	void BindOnlineDelegatesOSSv1();
 	void CreateOnlineSessionInternalOSSv1(ULocalPlayer* LocalPlayer, UCommonSession_HostSessionRequest* Request);
 	void FindSessionsInternalOSSv1(ULocalPlayer* LocalPlayer);
-	void JoinSessionInternalOSSv1(ULocalPlayer* LocalPlayer, UCommonSession_SearchResult* Request);
+	void JoinSessionInternalOSSv1(APlayerController* JoiningPlayer, ULocalPlayer* LocalPlayer, UCommonSession_SearchResult* Request);
 	TSharedRef<FCommonOnlineSearchSettings> CreateQuickPlaySearchSettingsOSSv1(UCommonSession_HostSessionRequest* Request, UCommonSession_SearchSessionRequest* QuickPlayRequest);
 	void CleanUpSessionsOSSv1();
 
@@ -376,12 +530,16 @@ protected:
 
 	// #START @AccelByte Implementation Matchmaking Handler
 	void OnMatchmakingStarted();
+	void OnMatchmakingStartedNotification();
+	void OnMatchmakingCanceledNotification();
 	void OnMatchmakingComplete(FName SessionName, bool bWasSuccessful);
 	void OnCancelMatchmakingComplete(FName SessionName, bool bWasSuccessful);
 	void OnMatchmakingTimeout(const FErrorInfo& Error);
 	void OnMatchFound(FString MatchId);
 	// #End
-	
+
+	void OnSessionParticipantsChange(FName SessionName, const FUniqueNetId& UniqueId, bool bJoined);
+	void OnSessionJoined(FName, EOnJoinSessionCompleteResult::Type);
 	void OnFindSessionsComplete(bool bWasSuccessful);
 	void OnJoinSessionComplete(FName SessionName, EOnJoinSessionCompleteResult::Type Result);
 	void OnRegisterJoiningLocalPlayerComplete(const FUniqueNetId& PlayerId, EOnJoinSessionCompleteResult::Type Result);
@@ -414,4 +572,90 @@ protected:
 	/** Settings for the current host request */
 	TSharedPtr<FCommonSession_OnlineSessionSettings> HostSettings;
 
+	// #START #SESSIONv2 @AccelByte Utility methods
+	bool bCreatingCustomSession;
+	bool bReceivedServerReadyUpdate;
+
+private:
+	/**
+	 * Number of restored game sessions that we have left to leave
+	 */
+	int32 NumberOfRestoredSessionsToLeave = 0;
+
+	/**
+	 * Handle to the delegate binding to listen to create session complete for custom games
+	 */
+	FDelegateHandle OnCreateCustomGameSessionHandle{};
+
+	/**
+	 * Handle to the delegate binding to listen to session update complete for updating network mode
+	 */
+	FDelegateHandle OnUpdateNetworkModeCompleteHandle{};
+
+	/**
+	 * Handle to the delegate binding to listen to session update complete for updating bots enabled
+	 */
+	FDelegateHandle OnUpdateBotsEnabledCompleteHandle{};
+
+	/**
+	 * Handle to the delegate binding to listen to session update complete for updating map name
+	 */
+	FDelegateHandle OnUpdateMapCompleteHandle{};
+
+	/**
+	 * Handle to the delegate binding to listen to session update complete for updating teams
+	 */
+	FDelegateHandle OnUpdateTeamsCompleteHandle{};
+
+	/**
+	 * Handle to the delegate binding to listen to session update complete for updating teams
+	 */
+	FDelegateHandle OnQueryUserInfoCompleteHandle{};
+
+	/** Get our session interface for interaction with game sessions */
+	FOnlineSessionAccelBytePtr GetSessionInterface() const;
+
+	/** Get our identity interface for checking lobby connection */
+	FOnlineIdentityAccelBytePtr GetIdentityInterface() const;
+
+	/** Get the user interface for interaction with users */
+	IOnlineUserPtr GetUserInterface() const;
+
+	/** Get local session IP for creation of a local session */
+	FString GetLocalSessionAddress() const;
+
+	/**
+	 * Method to restore all game sessions that the player is in, and leave them if they are in any.
+	 */
+	void RestoreAndLeaveActiveGameSessions(APlayerController* Player, const TDelegate<void(bool)>& OnRestoreAndLeaveAllComplete);
+
+	/**
+	 * Handler for when the call to restore all sessions completes, allowing us to leave all game sessions
+	 */
+	void OnRestoreAllSessionsComplete(const FUniqueNetId& LocalUserId, const FOnlineError& Result, TDelegate<void(bool)> OnRestoreAndLeaveAllComplete);
+
+	/**
+	 * Handler for when we leave a single restored game session, will call the delegate passed in once the number of sessions to leave is zero
+	 */
+	void OnLeaveRestoredGameSessionComplete(bool bWasSuccessful, FString SessionId, TDelegate<void(bool)> OnRestoreAndLeaveAllComplete);
+
+	void OnCreateCustomSessionComplete(FName SessionName, bool bWasSuccessful, FString AccelByteId, FOnHostCustomSessionComplete OnComplete);
+	
+	void CreateCustomGameSessionInternal(const APlayerController* LocalHostingPlayer, FOnHostCustomSessionComplete OnComplete);
+
+	void AddPlayerToCustomGameSessionTeam(const FString& PlayerAccelByteId, const FOnCustomSessionUpdateComplete& OnComplete);
+
+	/**
+	 * Handler for when an update to the custom game session completes
+	 */
+	void OnUpdateCustomGameSessionComplete(FName SessionName, bool bWasSuccessful, FOnSetCustomGameSettingComplete OnSettingUpdateComplete);
+
+	/**
+	 * 
+	 */
+	static int32 GetCurrentTeamIndex(const TArray<FAccelByteModelsV2GameSessionTeam>& Teams, const FString& PlayerAccelByteId);
+
+	void QuerySessionMembersData(int32 LocalUserNum, const FNamedOnlineSession* Session, const FOnQueryUserInfoCompleteDelegate& OnComplete);
+
+	// #END
 };

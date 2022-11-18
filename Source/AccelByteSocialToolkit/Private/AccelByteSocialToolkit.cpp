@@ -47,7 +47,7 @@ void UAccelByteSocialToolkit::OnLobbyConnected(int32 LocalUserNum, bool bWasSucc
 		QueryBlockedPlayers();
 		QueryRecentPlayers();
 
-		bool bAutoCreateParty = false;
+		/*bool bAutoCreateParty = false;
 		GConfig->GetBool(TEXT("AccelByteSocialToolkit"), TEXT("bAutoCreateParty"), bAutoCreateParty, GEngineIni);
 		if(bAutoCreateParty)
 		{
@@ -63,7 +63,7 @@ void UAccelByteSocialToolkit::OnLobbyConnected(int32 LocalUserNum, bool bWasSucc
 				Config,
 				USocialManager::FOnCreatePartyAttemptComplete::CreateUObject(this, &ThisClass::OnCreatePartyComplete)
 			);
-		}
+		}*/
 	}
 	
 	OnLobbyConnectedDelegate.Broadcast();

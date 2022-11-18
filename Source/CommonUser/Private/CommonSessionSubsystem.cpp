@@ -2,22 +2,25 @@
 
 #include "CommonSessionSubsystem.h"
 
-#include <OnlineSessionInterfaceV1AccelByte.h>
+#include <OnlineSessionSettingsAccelByte.h>
 
-#include "OnlineSubsystemAccelByte.h"
+#include "OnlineSessionInterfaceV1AccelByte.h"
 #include "OnlineSubsystemAccelByteDefines.h"
-#include "OnlineSubsystemAccelByteTypes.h"
 #include "GameFramework/GameModeBase.h"
 #include "Engine/AssetManager.h"
 #include "Engine/Engine.h"
 #include "Engine/LocalPlayer.h"
 
 #if COMMONUSER_OSSV1
+#include "OnlineSessionInterfaceV2AccelByte.h"
+#include "OnlineIdentityInterfaceAccelByte.h"
+#include "OnlineSubsystemAccelByteSessionSettings.h"
+#include "SocketSubsystem.h"
+#include "IPAddress.h"
 #include "OnlineSubsystem.h"
 #include "Online.h"
 #include "OnlineSubsystemSessionSettings.h"
 #include "OnlineSubsystemUtils.h"
-#include "Interfaces/OnlineIdentityInterface.h"
 
 FName SETTING_ONLINESUBSYSTEM_VERSION(TEXT("OSSv1"));
 #else
@@ -27,12 +30,34 @@ FName SETTING_ONLINESUBSYSTEM_VERSION(TEXT("OSSv1"));
 FName SETTING_ONLINESUBSYSTEM_VERSION(TEXT("OSSv2"));
 using namespace UE::Online;
 #endif // COMMONUSER_OSSV1
+#include "OnlineSubsystemAccelByte.h"
 
+#if COMMONUSER_OSSV1
+// #SESSIONv2 Define custom session settings
+#define SETTING_HOSTNAME FName(TEXT("HOSTNAME"))
+#define SETTING_SESSIONNAME FName(TEXT("SESSIONNAME"))
+#define SETTING_LOCALADDRESS FName(TEXT("LOCALADDRESS"))
+#endif
 
 DECLARE_LOG_CATEGORY_EXTERN(LogCommonSession, Log, All);
 DEFINE_LOG_CATEGORY(LogCommonSession);
 
 #define LOCTEXT_NAMESPACE "CommonUser"
+
+#define EARLY_RETURN_IF_INVALID(Condition, Subject, ReturnValue)        \
+	if(!ensure(Condition))                                              \
+	{                                                                   \
+		UE_LOG(LogCommonSession, Warning, TEXT(Subject " is invalid")); \
+		return ReturnValue;                                             \
+	}
+
+#define EARLY_RETURN_IF_INVALID_WITH_DELEGATE(Condition, Subject, ...)  \
+	if(!ensure(Condition))                                              \
+	{                                                                   \
+		UE_LOG(LogCommonSession, Warning, TEXT(Subject " is invalid")); \
+		OnComplete.ExecuteIfBound(__VA_ARGS__);                         \
+		return;                                                         \
+	}
 
 //////////////////////////////////////////////////////////////////////
 //UCommonSession_SearchResult
@@ -213,21 +238,10 @@ public:
 		: FCommonOnlineSearchSettingsBase(InSearchRequest)
 	{
 		bIsLanQuery = (InSearchRequest->OnlineMode == ECommonSessionOnlineMode::LAN);
-		MaxSearchResults = 10;
+		MaxSearchResults = 250;
 		PingBucketSize = 50;
 
-		QuerySettings.Set(SETTING_ONLINESUBSYSTEM_VERSION, true, EOnlineComparisonOp::Equals);
-		if (InSearchRequest->bUseLobbies)
-		{
-			QuerySettings.Set(SEARCH_PRESENCE, true, EOnlineComparisonOp::Equals);
-			QuerySettings.Set(SEARCH_LOBBIES, true, EOnlineComparisonOp::Equals);
-		}
-		if(InSearchRequest->ServerType != ECommonSessionOnlineServerType::NONE)
-		{
-			QuerySettings.Set<FString>(SETTING_SEARCH_TYPE,
-				InSearchRequest->ServerType == ECommonSessionOnlineServerType::P2P ? TEXT("p2p") : TEXT("dedicated"),
-				EOnlineComparisonOp::Equals);
-		}
+		//#TODO #SESSIONv2 Set any additional QuerySettings here
 	}
 
 	virtual ~FCommonOnlineSearchSettingsOSSv1() {}
@@ -279,7 +293,7 @@ FString UCommonSession_HostSessionRequest::ConstructTravelURL() const
 	{
 		CombinedExtraArgs += TEXT("?bIsLanMatch");
 	}
-	
+
 	if (OnlineMode != ECommonSessionOnlineMode::Offline)
 	{
 		CombinedExtraArgs += TEXT("?listen");
@@ -326,6 +340,9 @@ int32 UCommonSession_HostSessionRequest::GetMaxPlayers() const
 //////////////////////////////////////////////////////////////////////
 // UCommonSessionSubsystem
 
+#define SETTING_CUSTOMSESSION_EXPERIENCENAME FName(TEXT("EXPERIENCENAMESTRING"))
+#define SETTING_ISCUSTOMSESSION FName(TEXT("ISCUSTOMSESSION"))
+
 void UCommonSessionSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
 	Super::Initialize(Collection);
@@ -333,6 +350,8 @@ void UCommonSessionSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	GEngine->OnTravelFailure().AddUObject(this, &UCommonSessionSubsystem::TravelLocalSessionFailure);
 
 	FCoreUObjectDelegates::PostLoadMapWithWorld.AddUObject(this, &UCommonSessionSubsystem::HandlePostLoadMap);
+
+	bReceivedServerReadyUpdate = false;
 }
 
 void UCommonSessionSubsystem::BindOnlineDelegates()
@@ -347,11 +366,8 @@ void UCommonSessionSubsystem::BindOnlineDelegates()
 #if COMMONUSER_OSSV1
 void UCommonSessionSubsystem::BindOnlineDelegatesOSSv1()
 {
-	IOnlineSubsystem* OnlineSub = Online::GetSubsystem(GetWorld());
-	check(OnlineSub);
-
-	const IOnlineSessionPtr SessionInterface = OnlineSub->GetSessionInterface();
-	check(SessionInterface.IsValid());
+	const FOnlineSessionAccelBytePtr SessionInterface = GetSessionInterface();
+	ensure(SessionInterface.IsValid());
 
 	SessionInterface->AddOnCreateSessionCompleteDelegate_Handle(FOnCreateSessionCompleteDelegate::CreateUObject(this, &ThisClass::OnCreateSessionComplete));
 	SessionInterface->AddOnStartSessionCompleteDelegate_Handle(FOnStartSessionCompleteDelegate::CreateUObject(this, &ThisClass::OnStartSessionComplete));
@@ -360,33 +376,27 @@ void UCommonSessionSubsystem::BindOnlineDelegatesOSSv1()
 	SessionInterface->AddOnDestroySessionCompleteDelegate_Handle(FOnDestroySessionCompleteDelegate::CreateUObject(this, &ThisClass::OnDestroySessionComplete));
 
 	// #START @AccelByte Implementation
-	SessionInterface->AddOnMatchmakingCompleteDelegate_Handle(FOnMatchmakingCompleteDelegate::CreateUObject(this, &ThisClass::OnMatchmakingComplete));
 	SessionInterface->AddOnCancelMatchmakingCompleteDelegate_Handle(FOnCancelMatchmakingCompleteDelegate::CreateUObject(this, &ThisClass::OnCancelMatchmakingComplete));
-	if(OnlineSub->GetSubsystemName().IsEqual(TEXT("AccelByte"), ENameCase::IgnoreCase))
-	{
-		// Subscribe Start matchmaking notif
-		FOnlineSessionAccelBytePtr SessionAccelBytePtr = StaticCastSharedPtr<FOnlineSessionV1AccelByte>(SessionInterface);
-		SessionAccelBytePtr->AddOnMatchmakingStartedDelegate_Handle(FOnMatchmakingStartedDelegate::CreateUObject(this, &ThisClass::OnMatchmakingStarted));
-		SessionAccelBytePtr->AddOnMatchmakingFailedDelegate_Handle(FOnMatchmakingFailedDelegate::CreateUObject(this, &ThisClass::OnMatchmakingTimeout));
-		SessionAccelBytePtr->AddOnReadyConsentRequestedDelegate_Handle(FOnReadyConsentRequestedDelegate::CreateUObject(this, &ThisClass::OnMatchFound));
-	}
+	SessionInterface->AddOnSessionParticipantsChangeDelegate_Handle(FOnSessionParticipantsChangeDelegate::CreateUObject(this, &ThisClass::OnSessionParticipantsChange));
+	SessionInterface->AddOnJoinSessionCompleteDelegate_Handle(FOnJoinSessionCompleteDelegate::CreateUObject(this, &ThisClass::OnSessionJoined));
+	SessionInterface->AddOnMatchmakingCanceledDelegate_Handle(FOnMatchmakingCanceledDelegate::CreateUObject(this, &UCommonSessionSubsystem::OnMatchmakingCanceledNotification));
+	SessionInterface->AddOnMatchmakingStartedDelegate_Handle(FOnMatchmakingStartedDelegate::CreateUObject(this, &UCommonSessionSubsystem::OnMatchmakingStartedNotification));
 	// #END
 
 	SessionInterface->AddOnFindSessionsCompleteDelegate_Handle(FOnFindSessionsCompleteDelegate::CreateUObject(this, &ThisClass::OnFindSessionsComplete));
 // 	SessionInterface->AddOnCancelFindSessionsCompleteDelegate_Handle(FOnCancelFindSessionsCompleteDelegate::CreateUObject(this, &ThisClass::OnCancelFindSessionsComplete));
 // 	SessionInterface->AddOnPingSearchResultsCompleteDelegate_Handle(FOnPingSearchResultsCompleteDelegate::CreateUObject(this, &ThisClass::OnPingSearchResultsComplete));
-	SessionInterface->AddOnJoinSessionCompleteDelegate_Handle(FOnJoinSessionCompleteDelegate::CreateUObject(this, &ThisClass::OnJoinSessionComplete));
+//	SessionInterface->AddOnJoinSessionCompleteDelegate_Handle(FOnJoinSessionCompleteDelegate::CreateUObject(this, &ThisClass::OnJoinSessionComplete));
+	SessionInterface->AddOnMatchmakingCompleteDelegate_Handle(FOnMatchmakingCompleteDelegate::CreateUObject(this, &UCommonSessionSubsystem::OnMatchmakingComplete));
 
-//	THREE_PARAM(OnSessionParticipantsChange, FName, const FUniqueNetId&, bool);
-//	ONE_PARAM(OnQosDataRequested, FName);
-//	TWO_PARAM(OnSessionCustomDataChanged, FName, const FOnlineSessionSettings&);
-//	TWO_PARAM(OnSessionSettingsUpdated, FName, const FOnlineSessionSettings&);
-//	THREE_PARAM(OnSessionParticipantSettingsUpdated, FName, const FUniqueNetId&, const FOnlineSessionSettings&);
-//	TWO_PARAM(OnSessionParticipantRemoved, FName, const FUniqueNetId&);
-//	FOUR_PARAM(OnSessionUserInviteAccepted, const bool /*bWasSuccessful*/, const int32 /*ControllerId*/, FUniqueNetIdPtr /*UserId*/, const FOnlineSessionSearchResult& /*InviteResult*/);
-//	FOUR_PARAM(OnSessionInviteReceived, const FUniqueNetId& /*UserId*/, const FUniqueNetId& /*FromId*/, const FString& /*AppId*/, const FOnlineSessionSearchResult& /*InviteResult*/);
-//	THREE_PARAM(OnRegisterPlayersComplete, FName, const TArray< FUniqueNetIdRef >&, bool);
-//	THREE_PARAM(OnUnregisterPlayersComplete, FName, const TArray< FUniqueNetIdRef >&, bool);
+	if (GetGameInstance()->IsDedicatedServerInstance())
+	{
+		UE_LOG(LogCommonSession, Log, TEXT("Server - Binding to OnServerReceivedSession!"));
+
+		// For server, hook into the moment that the DS gets session information, read the MAPNAME, then do a ServerTravel to that map
+		const FOnServerReceivedSessionDelegate OnServerReceivedSessionDelegate = FOnServerReceivedSessionDelegate::CreateUObject(this, &UCommonSessionSubsystem::OnServerReceivedSession);
+		ServerReceivedSessionDelegateHandle = SessionInterface->AddOnServerReceivedSessionDelegate_Handle(OnServerReceivedSessionDelegate);
+	}
 
 	SessionInterface->AddOnSessionFailureDelegate_Handle(FOnSessionFailureDelegate::CreateUObject(this, &ThisClass::HandleSessionFailure));
 }
@@ -439,21 +449,6 @@ bool UCommonSessionSubsystem::ShouldCreateSubsystem(UObject* Outer) const
 	return ChildClasses.Num() == 0;
 }
 
-bool UCommonSessionSubsystem::IsLocalPlayerHostingSession() const
-{
-	const IOnlineSubsystem* OnlineSub = Online::GetSubsystem(GetWorld());
-	check(OnlineSub);
-
-	const IOnlineSessionPtr Sessions = OnlineSub->GetSessionInterface();
-	check(Sessions.IsValid());
-
-	const IOnlineIdentityPtr OnlineIdentity = OnlineSub->GetIdentityInterface();
-	check(OnlineIdentity.IsValid());
-
-	const FNamedOnlineSession* Session = Sessions->GetNamedSession(NAME_GameSession);
-	return Session->bHosting;
-}
-
 UCommonSession_HostSessionRequest* UCommonSessionSubsystem::CreateOnlineHostSessionRequest()
 {
 	/** Game-specific subsystems can override this or you can modify after creation */
@@ -487,7 +482,7 @@ void UCommonSessionSubsystem::HostSession(APlayerController* HostingPlayer, UCom
 	}
 
 	ULocalPlayer* LocalPlayer = (HostingPlayer != nullptr) ? HostingPlayer->GetLocalPlayer() : nullptr;
-	if (LocalPlayer == nullptr)
+	if (!ensure(LocalPlayer != nullptr))
 	{
 		UE_LOG(LogCommonSession, Error, TEXT("HostingPlayer is invalid"));
 		OnCreateSessionComplete(NAME_None, false);
@@ -534,54 +529,84 @@ void UCommonSessionSubsystem::CreateOnlineSessionInternal(ULocalPlayer* LocalPla
 #if COMMONUSER_OSSV1
 void UCommonSessionSubsystem::CreateOnlineSessionInternalOSSv1(ULocalPlayer* LocalPlayer, UCommonSession_HostSessionRequest* Request)
 {
+	const FOnlineIdentityAccelBytePtr IdentityInterface = GetIdentityInterface();
+	ensure(IdentityInterface.IsValid());
+
+	const FOnlineSessionAccelBytePtr SessionInterface = GetSessionInterface();
+	ensure(SessionInterface.IsValid());
+
 	const FName SessionName(NAME_GameSession);
 	const int32 MaxPlayers = Request->GetMaxPlayers();
 	const bool bIsPresence = Request->bUseLobbies; // Using lobbies implies presence
 
-	IOnlineSubsystem* const OnlineSub = Online::GetSubsystem(GetWorld());
-	check(OnlineSub);
-
-	IOnlineSessionPtr Sessions = OnlineSub->GetSessionInterface();
-	check(Sessions);
-
-	const FUniqueNetIdPtr UserId = LocalPlayer->GetPreferredUniqueNetId().GetUniqueNetId();
-
-	if (ensure(UserId.IsValid()))
+	const FUniqueNetIdPtr LocalPlayerId = LocalPlayer->GetPreferredUniqueNetId().GetUniqueNetId();
+	if (!ensure(LocalPlayerId.IsValid()))
 	{
-		HostSettings = MakeShareable(new FCommonSession_OnlineSessionSettings(Request->OnlineMode == ECommonSessionOnlineMode::LAN, bIsPresence, MaxPlayers));
-		HostSettings->bUseLobbiesIfAvailable = Request->bUseLobbies;
-		HostSettings->Set(SETTING_GAMEMODE, Request->ModeNameForAdvertisement, EOnlineDataAdvertisementType::ViaOnlineService);
-		HostSettings->Set(SETTING_MAPNAME, Request->GetMapName(), EOnlineDataAdvertisementType::ViaOnlineService);
-		//@TODO: HostSettings->Set(SETTING_MATCHING_HOPPER, FString("TeamDeathmatch"), EOnlineDataAdvertisementType::DontAdvertise);
-		HostSettings->Set(SETTING_MATCHING_TIMEOUT, 120.0f, EOnlineDataAdvertisementType::ViaOnlineService);
-		HostSettings->Set(SETTING_SESSION_TEMPLATE_NAME, FString(TEXT("GameSession")), EOnlineDataAdvertisementType::DontAdvertise);
-		HostSettings->Set(SETTING_ONLINESUBSYSTEM_VERSION, true, EOnlineDataAdvertisementType::ViaOnlineService);
-
-		// #START @AccelByte Implementation
-		HostSettings->Set(SETTING_ACCELBYTE_ICE_ENABLED, Request->ServerType == ECommonSessionOnlineServerType::P2P, EOnlineDataAdvertisementType::ViaOnlineService);
-		HostSettings->bIsDedicated = Request->ServerType == ECommonSessionOnlineServerType::Dedicated;
-		FString* NumBots = Request->ExtraArgs.Find(TEXT("NumBots"));
-		if(NumBots)
-		{
-			HostSettings->Set<int>(SETTING_NUMBOTS, FCString::Atoi(**NumBots), EOnlineDataAdvertisementType::ViaOnlineService);
-		}
-		else
-		{
-			HostSettings->Set<int>(SETTING_NUMBOTS, 0, EOnlineDataAdvertisementType::ViaOnlineService);
-		}
-		// #END
-
-		FSessionSettings& UserSettings = HostSettings->MemberSettings.Add(UserId.ToSharedRef(), FSessionSettings());
-		UserSettings.Add(SETTING_GAMEMODE, FOnlineSessionSetting(FString("GameSession"), EOnlineDataAdvertisementType::ViaOnlineService));
-
-		Sessions->CreateSession(*UserId, SessionName, *HostSettings);
-	}
-	else
-	{
+		UE_LOG(LogCommonSession, Error, TEXT("LocalPlayerId is invalid"));
 		OnCreateSessionComplete(SessionName, false);
+		return;
 	}
-}
 
+	HostSettings = MakeShareable(new FCommonSession_OnlineSessionSettings(Request->OnlineMode == ECommonSessionOnlineMode::LAN, bIsPresence, MaxPlayers));
+
+	HostSettings->NumPublicConnections = MaxPlayers;
+	HostSettings->NumPrivateConnections = 0;
+
+	HostSettings->Set(SETTING_SESSION_TYPE, SETTING_SESSION_TYPE_GAME_SESSION);
+	HostSettings->Set(SETTING_SESSION_JOIN_TYPE, TEXT("OPEN"));
+
+	HostSettings->Set(SETTING_HOSTNAME, IdentityInterface->GetPlayerNickname(LocalPlayerId.ToSharedRef().Get()));
+	HostSettings->Set(SETTING_SESSIONNAME, SessionName.ToString());
+
+	HostSettings->bUseLobbiesIfAvailable = Request->bUseLobbies;
+	HostSettings->Set(SETTING_GAMEMODE, Request->ModeNameForAdvertisement, EOnlineDataAdvertisementType::ViaOnlineService);
+	HostSettings->Set(SETTING_MAPNAME, Request->GetMapName(), EOnlineDataAdvertisementType::ViaOnlineService);
+	HostSettings->Set(SETTING_MATCHING_TIMEOUT, 120.0f, EOnlineDataAdvertisementType::ViaOnlineService);
+
+	// Define session template depending on server type
+	switch (Request->ServerType)
+	{
+	// Local
+	case ECommonSessionOnlineServerType::NONE:
+	{
+		HostSettings->Set(SETTING_SESSION_TEMPLATE_NAME, TEXT("LyraGameSession"));
+
+		const FString LocalAddress = GetLocalSessionAddress();
+		HostSettings->Set(SETTING_LOCALADDRESS, LocalAddress);
+		break;
+	}
+	// DS
+	case ECommonSessionOnlineServerType::Dedicated:
+	{
+		HostSettings->bIsDedicated = true;
+		HostSettings->Set(SETTING_SESSION_TEMPLATE_NAME, TEXT("LyraDSGameSession"));
+
+		TArray<FString> Regions = SessionInterface->GetRegionList(LocalPlayerId.ToSharedRef().Get());
+		if (ensure(Regions.IsValidIndex(0)))
+		{
+			HostSettings->Set(SETTING_GAMESESSION_REQUESTEDREGIONS, Regions[0]);
+		}
+
+		break;
+	}
+	// P2P
+	case ECommonSessionOnlineServerType::P2P:
+	{
+		HostSettings->Set(SETTING_SESSION_TEMPLATE_NAME, TEXT("LyraP2PGameSession"));
+		break;
+	}
+	}
+	HostSettings->Set(SETTING_ONLINESUBSYSTEM_VERSION, true, EOnlineDataAdvertisementType::ViaOnlineService);
+	HostSettings->bIsDedicated = Request->ServerType == ECommonSessionOnlineServerType::Dedicated;
+
+	const FOnSessionServerUpdateDelegate OnSessionServerUpdateDelegate = FOnSessionServerUpdateDelegate::CreateUObject(this, &UCommonSessionSubsystem::OnSessionServerUpdate);
+	SessionServerUpdateDelegateHandle = SessionInterface->AddOnSessionServerUpdateDelegate_Handle(OnSessionServerUpdateDelegate);
+
+	const FOnCreateSessionCompleteDelegate OnCreateSessionCompleteDelegate = FOnCreateSessionCompleteDelegate::CreateUObject(this, &UCommonSessionSubsystem::OnCreateSessionComplete);
+	CreateSessionDelegateHandle = SessionInterface->AddOnCreateSessionCompleteDelegate_Handle(OnCreateSessionCompleteDelegate);
+
+	SessionInterface->CreateSession(LocalPlayerId.ToSharedRef().Get(), NAME_GameSession, *HostSettings);
+}
 #else
 
 void UCommonSessionSubsystem::CreateOnlineSessionInternalOSSv2(ULocalPlayer* LocalPlayer, UCommonSession_HostSessionRequest* Request)
@@ -642,24 +667,45 @@ void UCommonSessionSubsystem::OnCreateSessionComplete(FName SessionName, bool bW
 	}
 
 #if COMMONUSER_OSSV1 // OSSv2 joins splitscreen players as part of the create call
-	// Add the splitscreen player if one exists
-#if 0 //@TODO:
-	if (bWasSuccessful && LocalPlayers.Num() > 1)
+
+	// Ignore non-game session create results
+	if (SessionName != NAME_GameSession)
 	{
-		IOnlineSessionPtr Sessions = Online::GetSessionInterface(GetWorld());
-		if (Sessions.IsValid() && LocalPlayers[1]->GetPreferredUniqueNetId().IsValid())
-		{
-			Sessions->RegisterLocalPlayer(*LocalPlayers[1]->GetPreferredUniqueNetId(), NAME_GameSession,
-				FOnRegisterLocalPlayerCompleteDelegate::CreateUObject(this, &ThisClass::OnRegisterLocalPlayerComplete_CreateSession));
-		}
+		return;
 	}
-	else
-#endif
-#endif
+
+	if (!bWasSuccessful)
 	{
-		// We either failed or there is only a single local user
-		FinishSessionCreation(bWasSuccessful);
+		return;
 	}
+
+	const FOnlineSessionAccelBytePtr SessionInterface = GetSessionInterface();
+	ensure(SessionInterface.IsValid());
+
+	// Remove our delegate handler for create session, we will rebind if we create a new session
+	SessionInterface->ClearOnCreateSessionCompleteDelegate_Handle(CreateSessionDelegateHandle);
+	CreateSessionDelegateHandle.Reset();
+
+	FNamedOnlineSession* Session = SessionInterface->GetNamedSession(SessionName);
+	if (!ensure(Session != nullptr))
+	{
+		return;
+	}
+
+	TSharedPtr<FOnlineSessionInfoAccelByteV2> SessionInfo = StaticCastSharedPtr<FOnlineSessionInfoAccelByteV2>(Session->SessionInfo);
+	if (!ensure(SessionInfo.IsValid()))
+	{
+		return;
+	}
+
+	// Finally issue server travel to specified match URL set in UCommonSessionSubsystem::CreateOnlineSessionInternal
+	FinishSessionCreation(true);
+#else
+
+	// We either failed or there is only a single local user
+	FinishSessionCreation(bWasSuccessful);
+
+#endif
 }
 
 #if COMMONUSER_OSSV1
@@ -681,10 +727,15 @@ void UCommonSessionSubsystem::OnStartSessionComplete(FName SessionName, bool bWa
 
 void UCommonSessionSubsystem::FinishSessionCreation(bool bWasSuccessful)
 {
-	if (bWasSuccessful)
+	if (bWasSuccessful && !bCreatingCustomSession && !GetGameInstance()->IsDedicatedServerInstance())
 	{
 		// Travel to the specified match URL
 		GetWorld()->ServerTravel(PendingTravelURL);
+	}
+
+	if(bCreatingCustomSession)
+	{
+		bCreatingCustomSession = false;
 	}
 //@TODO: handle failure
 // 	else
@@ -698,7 +749,48 @@ void UCommonSessionSubsystem::FinishSessionCreation(bool bWasSuccessful)
 #if COMMONUSER_OSSV1
 void UCommonSessionSubsystem::OnUpdateSessionComplete(FName SessionName, bool bWasSuccessful)
 {
-	UE_LOG(LogCommonSession, Log, TEXT("OnUpdateSessionComplete(SessionName: %s, bWasSuccessful: %d"), *SessionName.ToString(), bWasSuccessful ? TEXT("true") : TEXT("false"));
+	UE_LOG(LogCommonSession, Log, TEXT("OnUpdateSessionComplete(SessionName: %s, bWasSuccessful: %s"), *SessionName.ToString(), bWasSuccessful ? TEXT("true") : TEXT("false"));
+	
+	if (SessionName != NAME_GameSession)
+	{
+		return;
+	}
+
+	UE_LOG(LogCommonSession, Log, TEXT("Session updated"));
+	OnSessionChangedDelegate.Broadcast();
+
+	const FOnlineSessionAccelBytePtr SessionInterface = GetSessionInterface();
+	if (!ensure(SessionInterface.IsValid()))
+	{
+		UE_LOG(LogCommonSession, Warning, TEXT("OnUpdateSessionComplete: Session interface was invalid!"));
+		return;
+	}
+
+	FOnlineSessionSettings* SessionSettings = SessionInterface->GetSessionSettings(NAME_GameSession);
+	if (SessionSettings == nullptr)
+	{
+		UE_LOG(LogCommonSession, Warning, TEXT("OnUpdateSessionComplete: SessionSettings was nullptr!"));
+		return;
+	}
+
+	bool ServerConnectSettingValue;
+	if (!SessionSettings->Get(SETTING_SESSION_SERVER_CONNECT_READY, ServerConnectSettingValue))
+	{
+		bReceivedServerReadyUpdate = false;
+		UE_LOG(LogCommonSession, Warning, TEXT("OnUpdateSessionComplete: Ignoring notif. Not reguarding connect ready flag for matchmaking."));
+		return;
+	}
+
+
+	if (ServerConnectSettingValue && !bReceivedServerReadyUpdate)
+	{
+		bReceivedServerReadyUpdate = true;
+		InternalTravelToSession(NAME_GameSession);
+	}
+	else if (!ServerConnectSettingValue)
+	{
+		bReceivedServerReadyUpdate = false;
+	}
 }
 
 void UCommonSessionSubsystem::OnEndSessionComplete(FName SessionName, bool bWasSuccessful)
@@ -724,48 +816,63 @@ void UCommonSessionSubsystem::OnMatchmakingStarted()
 		UCommonSession_HostSessionRequest* HostRequest = CreateOnlineHostSessionRequest();
 		TStrongObjectPtr<UCommonSession_HostSessionRequest> HostRequestPtr = TStrongObjectPtr<UCommonSession_HostSessionRequest>(HostRequest);
 		MatchRequest->OnSearchFinished.AddUObject(this, &UCommonSessionSubsystem::HandleMatchmakingFinished, JoinUser, HostRequestPtr);
-		
+
 		SearchSettings = CreateMatchmakingSearchSettings(HostRequest, MatchRequest);
 	}
-	
+
 	OnMatchmakingStartDelegate.Broadcast();
+}
+
+void UCommonSessionSubsystem::OnMatchmakingStartedNotification()
+{	
+	OnMatchmakingStarted();
+}
+
+void UCommonSessionSubsystem::OnMatchmakingCanceledNotification()
+{
+	OnMatchmakingCancelDelegate.Broadcast();
 }
 
 void UCommonSessionSubsystem::OnMatchmakingComplete(FName SessionName, bool bWasSuccessful)
 {
 	UE_LOG(LogCommonSession, Log, TEXT("OnMatchmakingComplete(SessionName: %s, bWasSuccessful: %s)"), *SessionName.ToString(), bWasSuccessful ? TEXT("true") : TEXT("false"));
 
+	const FOnlineSessionAccelBytePtr SessionInterface = GetSessionInterface();
+	ensure(SessionInterface.IsValid());
+
 	if(!SearchSettings.IsValid())
 	{
-		// matchmaking is failed or canceled
-		return;
-	}
-
-	// For a user that don't start matchmaking (on a party), the FOnlineSessionSearch will not referenced from this class
-	// instead created by AccelByte OSS.
-	if(SearchSettings->SearchResults.Num() == 0)
-	{
-		IOnlineSubsystem* OnlineSub = Online::GetSubsystem(GetWorld());
-		check(OnlineSub);
-		IOnlineSessionPtr Sessions = OnlineSub->GetSessionInterface();
-		check(Sessions);
-		FOnlineSessionAccelBytePtr SessionAccelBytePtr = StaticCastSharedPtr<FOnlineSessionV1AccelByte>(Sessions);
-		check(SessionAccelBytePtr)
-		
-		TSharedPtr<FOnlineSessionSearch> SessionSearch = SessionAccelBytePtr->GetSessionSearch();
-		if(SessionSearch.IsValid())
+		// If SearchSettings are invalid for some reason, as a fallback, check for matchmaking handle in session interface
+		TSharedPtr<FOnlineSessionSearch> SessionSearch = SessionInterface->GetCurrentMatchmakingSearchHandle();
+		if (SessionSearch.IsValid())
 		{
-			if(SessionSearch->SearchResults.Num() > 0)
-			{
-				// This user is not the one who start the matchmaking
-				UE_LOG(LogCommonSession, Log, TEXT("UCommonSessionSubsystem::OnMatchmakingComplete - local user is not the one started the matchmaking!"));
-				
-				SearchSettings->SearchResults = SessionSearch->SearchResults;
-			}
-			SearchSettings->SearchState = SessionSearch->SearchState;
+			// If found, create a search setting template
+			UCommonSession_SearchSessionRequest* MatchRequest = CreateOnlineSearchSessionRequest();
+			TWeakObjectPtr<APlayerController> JoinUser = MakeWeakObjectPtr(GetGameInstance()->GetFirstLocalPlayerController());
+			UCommonSession_HostSessionRequest* HostRequest = CreateOnlineHostSessionRequest();
+			TStrongObjectPtr<UCommonSession_HostSessionRequest> HostRequestPtr = TStrongObjectPtr<UCommonSession_HostSessionRequest>(HostRequest);
+			MatchRequest->OnSearchFinished.AddUObject(this, &UCommonSessionSubsystem::HandleMatchmakingFinished, JoinUser, HostRequestPtr);
+
+			SearchSettings = CreateMatchmakingSearchSettings(HostRequest, MatchRequest);
+		} 
+		else 
+		{
+			// Otherwise matchmaking failed or was canceled
+			return;
 		}
 	}
-	
+
+	// Get the search results from the OSS
+	TSharedPtr<FOnlineSessionSearch> SessionSearch = SessionInterface->GetCurrentMatchmakingSearchHandle();
+	if (SessionSearch.IsValid())
+	{
+		if (SessionSearch->SearchResults.Num() > 0)
+		{
+			SearchSettings->SearchResults = SessionSearch->SearchResults;
+		}
+		SearchSettings->SearchState = SessionSearch->SearchState;
+	}
+
 	FCommonOnlineSearchSettingsOSSv1& SearchSettingsV1 = *StaticCastSharedPtr<FCommonOnlineSearchSettingsOSSv1>(SearchSettings);
 	if (SearchSettingsV1.SearchState == EOnlineAsyncTaskState::InProgress)
 	{
@@ -788,6 +895,9 @@ void UCommonSessionSubsystem::OnMatchmakingComplete(FName SessionName, bool bWas
 			UCommonSession_SearchResult* Entry = NewObject<UCommonSession_SearchResult>(SearchSettingsV1.SearchRequest);
 			Entry->Result = Result;
 			SearchSettingsV1.SearchRequest->Results.Add(Entry);
+
+			// #SESSIONv2 We will want to broadcast match found here to match session v1 parity
+			OnMatchFoundDelegate.Broadcast(Entry->Result.Session.GetSessionIdStr());
 		}
 	}
 	else
@@ -802,7 +912,7 @@ void UCommonSessionSubsystem::OnCancelMatchmakingComplete(FName SessionName, boo
 {
 	UE_LOG(LogCommonSession, Log, TEXT("OnCancelMatchmakingComplete(SessionName: %s, bWasSuccessful: %s)"), *SessionName.ToString(), bWasSuccessful ? TEXT("true") : TEXT("false"));
 
-	OnMatchmakingCanceledDelegate.Broadcast();
+	OnMatchmakingCancelDelegate.Broadcast();
 	CleanUpSessions();
 }
 
@@ -810,7 +920,6 @@ void UCommonSessionSubsystem::OnMatchmakingTimeout(const FErrorInfo& Error)
 {
 	UE_LOG(LogCommonSession, Log, TEXT("OnMatchmakingTimeoutDelegate"));
 
-	SearchSettings.Reset();
 	OnMatchmakingTimeoutDelegate.Broadcast(Error);
 	CleanUpSessions();
 }
@@ -818,13 +927,315 @@ void UCommonSessionSubsystem::OnMatchmakingTimeout(const FErrorInfo& Error)
 void UCommonSessionSubsystem::OnMatchFound(FString MatchId)
 {
 	UE_LOG(LogCommonSession, Log, TEXT("OnMatchFoundDelegate"));
-	
+
 	OnMatchFoundDelegate.Broadcast(MatchId);
 }
 
 // #END
 
 #endif // COMMONUSER_OSSV1
+
+#if AB_USE_V2_SESSIONS
+void UCommonSessionSubsystem::QuerySessionMembersData(int32 LocalUserNum, const FNamedOnlineSession* Session, const FOnQueryUserInfoCompleteDelegate& OnComplete)
+{
+	const FOnlineSessionAccelBytePtr SessionInterface = GetSessionInterface();
+	EARLY_RETURN_IF_INVALID_WITH_DELEGATE(SessionInterface.IsValid(), "Session interface", LocalUserNum, false, {}, {});
+
+	const IOnlineUserPtr UserInterface = GetUserInterface();
+	EARLY_RETURN_IF_INVALID_WITH_DELEGATE(UserInterface.IsValid(), "User interface", LocalUserNum, false, {}, {});
+
+	TArray<FUniqueNetIdRef> UsersToFetch;
+	for(const auto& MemberId : Session->RegisteredPlayers)
+	{
+		if(UserInterface->GetUserInfo(LocalUserNum, MemberId.Get()) == nullptr)
+		{
+			UsersToFetch.Add(MemberId);
+		}
+	}
+
+	if(UsersToFetch.Num() > 0)
+	{
+		OnQueryUserInfoCompleteHandle = UserInterface->AddOnQueryUserInfoCompleteDelegate_Handle(LocalUserNum, FOnQueryUserInfoCompleteDelegate::CreateWeakLambda(
+			this, [this, OnComplete, UserInterface](int32 LocalUserNum, bool bWasSuccessful, const TArray<FUniqueNetIdRef>& UserIds, const FString& ErrorStr) {
+				UserInterface->ClearOnQueryUserInfoCompleteDelegate_Handle(LocalUserNum, OnQueryUserInfoCompleteHandle);
+				OnComplete.ExecuteIfBound(LocalUserNum, bWasSuccessful, UserIds, ErrorStr);
+			}));
+		UserInterface->QueryUserInfo(LocalUserNum, UsersToFetch);
+
+		return;
+	}
+
+	OnComplete.ExecuteIfBound(LocalUserNum, true, {}, {});
+}
+
+void UCommonSessionSubsystem::GetSessionTeams(const APlayerController* QueryingPlayer, const FOnGetSessionTeamsCompleteDelegate& OnComplete)
+{
+	const FOnlineSessionAccelBytePtr SessionInterface = GetSessionInterface();
+	EARLY_RETURN_IF_INVALID_WITH_DELEGATE(SessionInterface.IsValid(), "Session interface", {});
+
+	const IOnlineUserPtr UserInterface = GetUserInterface();
+	EARLY_RETURN_IF_INVALID_WITH_DELEGATE(UserInterface.IsValid(), "User interface", {});
+
+	const FOnlineIdentityAccelBytePtr IdentityInterface = GetIdentityInterface();
+	EARLY_RETURN_IF_INVALID_WITH_DELEGATE(IdentityInterface.IsValid(), "Identity interface", {});
+
+	const FNamedOnlineSession* Session = SessionInterface->GetNamedSession(NAME_GameSession);
+	EARLY_RETURN_IF_INVALID_WITH_DELEGATE(Session != nullptr, "Current session", {});
+
+	const ULocalPlayer* LocalPlayer = QueryingPlayer->GetLocalPlayer();
+	EARLY_RETURN_IF_INVALID_WITH_DELEGATE(LocalPlayer != nullptr, "Local player", {});
+
+	const int32 LocalUserNum = LocalPlayer->GetControllerId();
+	const auto LocalUserId = LocalPlayer->GetPreferredUniqueNetId();
+	EARLY_RETURN_IF_INVALID_WITH_DELEGATE(LocalUserId.IsValid(), "Local user ID", {});
+
+	const TSharedPtr<FOnlineSessionInfoAccelByteV2> SessionInfo = StaticCastSharedPtr<FOnlineSessionInfoAccelByteV2>(Session->SessionInfo);
+	EARLY_RETURN_IF_INVALID_WITH_DELEGATE(SessionInfo.IsValid(), "Session info", {});
+
+	const FUniqueNetIdPtr LeaderId = SessionInfo->GetLeaderId();
+	EARLY_RETURN_IF_INVALID_WITH_DELEGATE(LeaderId.IsValid(), "Session leader ID", {});
+
+	QuerySessionMembersData(LocalUserNum, Session, FOnQueryUserInfoCompleteDelegate::CreateWeakLambda(this,
+		[this, SessionInfo, UserInterface, LocalUserId, LeaderId, OnComplete](int32 LocalUserNum, bool, const TArray<FUniqueNetIdRef>&, const FString&) {
+			TArray<FCommonSessionTeam> OutTeams;
+			for(const FAccelByteModelsV2GameSessionTeam& Team : SessionInfo->GetTeamAssignments())
+			{
+				FCommonSessionTeam SessionTeam;
+
+				for(const FString& UserId : Team.UserIDs)
+				{
+					FAccelByteUniqueIdComposite IdComponents;
+					IdComponents.Id = UserId;
+					TSharedPtr<const FUniqueNetIdAccelByteUser> AccelByteId = FUniqueNetIdAccelByteUser::Create(IdComponents);
+
+					const TSharedPtr<FOnlineUser> UserInfo = UserInterface->GetUserInfo(LocalUserNum, AccelByteId.ToSharedRef().Get());
+					if(!ensure(UserInfo.IsValid()))
+					{
+						UE_LOG(LogCommonSession, Warning, TEXT("User info for %s is invalid/nonexistent"), *UserId);
+						continue;
+					}
+
+					const bool bIsLeader = LeaderId.ToSharedRef().Get() == AccelByteId.ToSharedRef().Get();
+					const bool bIsLocalUser = LocalUserId == AccelByteId.ToSharedRef().Get();
+					const auto Member = FCommonSessionMember(UserInfo->GetUserId(), UserInfo->GetDisplayName(), bIsLeader, bIsLocalUser);
+
+					SessionTeam.Members.Add(Member);
+				}
+
+				OutTeams.Add(SessionTeam);
+			}
+
+			const uint8 RemainingTeams = 3 - OutTeams.Num();
+
+			// Make sure that there is always 3 teams in the output
+			for(uint8 i = 0; i < RemainingTeams; i++)
+			{
+				OutTeams.Add({});
+			}
+
+			OnComplete.ExecuteIfBound(OutTeams);
+		}));
+}
+
+bool UCommonSessionSubsystem::IsLocalUserLeader(const APlayerController* QueryingPlayer)
+{
+	const FOnlineSessionAccelBytePtr SessionInterface = GetSessionInterface();
+	EARLY_RETURN_IF_INVALID(SessionInterface.IsValid(), "Session interface", false);
+
+	const FNamedOnlineSession* Session = SessionInterface->GetNamedSession(NAME_GameSession);
+	EARLY_RETURN_IF_INVALID(Session != nullptr, "Current session", false);
+
+	const TSharedPtr<FOnlineSessionInfoAccelByteV2> SessionInfo = StaticCastSharedPtr<FOnlineSessionInfoAccelByteV2>(Session->SessionInfo);
+	EARLY_RETURN_IF_INVALID(SessionInfo.IsValid(), "Session info", false);
+
+	const FUniqueNetIdPtr LeaderId = SessionInfo->GetLeaderId();
+	EARLY_RETURN_IF_INVALID(LeaderId.IsValid(), "Session leader ID", false);
+
+	const auto LocalUserId = QueryingPlayer->GetLocalPlayer()->GetPreferredUniqueNetId();
+	EARLY_RETURN_IF_INVALID(LocalUserId.IsValid(), "Local user ID", false);
+
+	return LocalUserId == LeaderId;
+}
+
+// #START @AccelByte Implementation SessionV2
+void UCommonSessionSubsystem::OnSessionParticipantsChange(FName SessionName, const FUniqueNetId&, bool bJoined)
+{
+	if(SessionName != NAME_GameSession)
+	{
+		return;
+	}
+
+	UE_LOG(LogCommonSession, Log, TEXT("Session participants changed"));
+
+	if(bJoined)
+	{
+		OnSessionChangedDelegate.Broadcast();
+		return;
+	}
+
+	// #NOTE: This is a quick and dirty solution to remove leaving members from the teams array until the backend does this (?)
+	{
+		const auto SessionInterface = GetSessionInterface();
+		const auto Session = SessionInterface->GetNamedSession(SessionName);
+		const auto SessionInfo = StaticCastSharedPtr<FOnlineSessionInfoAccelByteV2>(Session->SessionInfo);
+		const auto Teams = SessionInfo->GetTeamAssignments();
+
+		TArray<FAccelByteModelsV2GameSessionTeam> NewTeams;
+		for(const auto& Team : Teams)
+		{
+			TArray<FString> NewUserIds;
+			for(const auto& UserIdString : Team.UserIDs)
+			{
+				FAccelByteUniqueIdComposite IdComponents;
+				IdComponents.Id = UserIdString;
+				TSharedPtr<const FUniqueNetIdAccelByteUser> AccelByteId = FUniqueNetIdAccelByteUser::Create(IdComponents);
+
+				const FUniqueNetIdRef* FoundId = SessionInfo->GetJoinedMembers().FindByPredicate([AccelByteId](FUniqueNetIdRef Id){
+					return AccelByteId.ToSharedRef().Get() == Id.Get();
+				});
+
+				if(FoundId != nullptr)
+				{
+					NewUserIds.Add(UserIdString);
+				}
+			}
+			NewTeams.Add({NewUserIds});
+		}
+
+		// Not updating the backend because the it already performed the above to its copy of the teams array
+		SessionInfo->SetTeamAssignments(NewTeams);
+	}
+
+	OnSessionChangedDelegate.Broadcast();
+}
+
+void UCommonSessionSubsystem::OnSessionJoined(FName SessionName, EOnJoinSessionCompleteResult::Type)
+{
+	if(SessionName != NAME_GameSession)
+	{
+		return;
+	}
+
+	UE_LOG(LogCommonSession, Log, TEXT("Session joined"));
+	OnSessionJoinedDelegate.Broadcast();
+}
+
+void UCommonSessionSubsystem::OnStartMatchmakingComplete(FName SessionName, const FOnlineError& ErrorDetails, const FSessionMatchmakingResults& Results)
+{
+	const FOnlineSessionAccelBytePtr SessionInterface = GetSessionInterface();
+	ensure(SessionInterface.IsValid());
+
+	if (!ErrorDetails.bSucceeded)
+	{
+		CurrentMatchmakingSearchHandle.Reset();
+	}
+
+	// Instead of calling OnMatchmakingStarted here, we will wait for the matchmaking started notification from lobby service
+}
+
+void UCommonSessionSubsystem::OnDestroySessionForJoinComplete(FName SessionName, bool bWasSuccessful, UCommonSession_SearchResult* Request, APlayerController* JoiningPlayer)
+{
+	if (SessionName != NAME_GameSession)
+	{
+		return;
+	}
+
+	JoinSession(JoiningPlayer, Request);
+}
+
+void UCommonSessionSubsystem::OnSessionServerUpdate(FName SessionName)
+{
+	UE_LOG(LogCommonSession, Log, TEXT("OnSessionServerUpdate called"));
+
+	// Ignore non-game session join results
+	if (SessionName != NAME_GameSession)
+	{
+		return;
+	}
+
+	const FOnlineSessionAccelBytePtr SessionInterface = GetSessionInterface();
+	EARLY_RETURN_IF_INVALID(SessionInterface.IsValid(), "Session interface", );
+
+	SessionInterface->GetResolvedConnectString(NAME_GameSession, PendingTravelURL);
+
+	UE_LOG(LogCommonSession, Error, TEXT("Travel URL: '%s'"), *PendingTravelURL);
+
+	// Remove our delegate handler for update session server, we will rebind if needed later
+	SessionInterface->ClearOnSessionServerUpdateDelegate_Handle(SessionServerUpdateDelegateHandle);
+	SessionServerUpdateDelegateHandle.Reset();
+
+	FNamedOnlineSession* Session = SessionInterface->GetNamedSession(SessionName);
+	EARLY_RETURN_IF_INVALID(Session != nullptr, "Current session", );
+
+	APlayerController* const PlayerController = GetGameInstance()->GetFirstLocalPlayerController();
+	if (PlayerController == nullptr)
+	{
+		FText ReturnReason = NSLOCTEXT("NetworkErrors", "InvalidPlayerController", "Invalid Player Controller");
+		UE_LOG(LogCommonSession, Error, TEXT("InternalTravelToSession(Failed due to %s)"), *ReturnReason.ToString());
+		return;
+	}
+
+	FString TravelUrl{};
+	if (!SessionInterface->GetResolvedConnectString(SessionName, TravelUrl))
+	{
+		FText FailReason = NSLOCTEXT("NetworkErrors", "TravelSessionFailed", "OnSessionServerUpdate - Travel to Session failed. Unable to get resolved connect string.");
+		UE_LOG(LogCommonSession, Error, TEXT("InternalTravelToSession(%s)"), *FailReason.ToString());
+		return;
+	}
+
+	PlayerController->ClientTravel(TravelUrl, TRAVEL_Absolute);
+	UE_LOG(LogCommonSession, Log, TEXT("Client traveling to: %s"), *TravelUrl);
+}
+
+void UCommonSessionSubsystem::OnServerReceivedSession(FName SessionName)
+{
+	UE_LOG(LogCommonSession, Log, TEXT("Server - OnServerReceivedSession called"));
+
+	// Ignore non-game session join results
+	if (SessionName != NAME_GameSession)
+	{
+		UE_LOG(LogCommonSession, Log, TEXT("Server - Named session was not of type GameSession, skipping!"));
+		return;
+	}
+
+	const FOnlineSessionAccelBytePtr SessionInterface = GetSessionInterface();
+	ensure(SessionInterface.IsValid());
+
+	// Remove our delegate handler we will rebind if needed later
+	SessionInterface->ClearOnServerReceivedSessionDelegate_Handle(ServerReceivedSessionDelegateHandle);
+	ServerReceivedSessionDelegateHandle.Reset();
+
+	FNamedOnlineSession* Session = SessionInterface->GetNamedSession(SessionName);
+	if (!ensure(Session != nullptr))
+	{
+		UE_LOG(LogCommonSession, Error, TEXT("Server - Named session was null! Unable to travel to map"));
+		return;
+	}
+
+	// Read the MAPNAME from session settings, then do a ServerTravel to that map
+	FString MapName = TEXT("");
+	Session->SessionSettings.Get(SETTING_MAPNAME, MapName);
+
+	if (!MapName.IsEmpty())
+	{
+		UE_LOG(LogCommonSession, Log, TEXT("Server - Traveling to %s"), *MapName);
+
+		if (GetWorld()->IsInSeamlessTravel())
+		{
+			UE_LOG(LogCommonSession, Log, TEXT("Server - Currently in seemless travel! Waiting until travel is done until attempting to server travel to target map."));
+			// #TODO if this is the case, then bind to some travel complete delegate then call server travel?
+		}
+
+		GetWorld()->ServerTravel(MapName, true);
+	}
+	else
+	{
+		UE_LOG(LogCommonSession, Error, TEXT("Server - Map name empty! Unable to travel to map"));
+	}
+}
+
+// #END
+#endif // AB_USE_V2_SESSIONS
 
 void UCommonSessionSubsystem::FindSessions(APlayerController* SearchingPlayer, UCommonSession_SearchSessionRequest* Request)
 {
@@ -853,7 +1264,7 @@ void UCommonSessionSubsystem::FindSessionsInternal(APlayerController* SearchingP
 	}
 
 	ULocalPlayer* LocalPlayer = (SearchingPlayer != nullptr) ? SearchingPlayer->GetLocalPlayer() : nullptr;
-	if (LocalPlayer == nullptr)
+	if (!ensure(LocalPlayer != nullptr))
 	{
 		UE_LOG(LogCommonSession, Error, TEXT("SearchingPlayer is invalid"));
 		InSearchSettings->SearchRequest->NotifySearchFinished(false, LOCTEXT("Error_FindSessionBadPlayer", "Session search was not provided a local player"));
@@ -872,43 +1283,32 @@ void UCommonSessionSubsystem::FindSessionsInternal(APlayerController* SearchingP
 #if COMMONUSER_OSSV1
 void UCommonSessionSubsystem::FindSessionsInternalOSSv1(ULocalPlayer* LocalPlayer)
 {
-	IOnlineSubsystem* OnlineSub = Online::GetSubsystem(GetWorld());
-	check(OnlineSub);
-	IOnlineSessionPtr Sessions = OnlineSub->GetSessionInterface();
-	check(Sessions);
-	
 	// #START @AccelByte Implementation
-	FString GameMode;
-	FString SearchingMM;
-	bool bIsDedicated = false;
-	SearchSettings->QuerySettings.Get<FString>(SETTING_GAMEMODE, GameMode);
-	SearchSettings->QuerySettings.Get<FString>(SEARCH_MATCHMAKING_QUEUE, SearchingMM);
-	SearchSettings->QuerySettings.Get<bool>(SEARCH_DEDICATED_ONLY, bIsDedicated);
-	if(!GameMode.IsEmpty() && GameMode.Equals(SearchingMM) && bIsDedicated)
+	const FOnlineSessionAccelBytePtr SessionInterface = GetSessionInterface();
+	ensure(SessionInterface.IsValid());
+
+	if (!ensure(LocalPlayer != nullptr))
 	{
-		// Overriding the matchmaking by command line (debugging purpose)
-		FString OverrideMatchmakingMode;
-		FParse::Value(FCommandLine::Get(), TEXT("-CUSTOM_MM_MODE="), OverrideMatchmakingMode);
-		if(!OverrideMatchmakingMode.IsEmpty())
-		{
-			SearchSettings->QuerySettings.Set(SETTING_GAMEMODE, OverrideMatchmakingMode, EOnlineComparisonOp::Equals);
-		}
-		
-		TSharedRef<FOnlineSessionSearch> SearchSession = ConstCastSharedRef<FCommonOnlineSearchSettingsOSSv1>(SearchSettings.ToSharedRef());
-		Sessions->StartMatchmaking(
-			{LocalPlayer->GetPreferredUniqueNetId()->AsShared()},
-			NAME_GameSession,
-			FOnlineSessionSettings(),
-			SearchSession
-		);
+		UE_LOG(LogCommonSession, Error, TEXT("SearchingPlayer is invalid"));
+		return;
 	}
-	else
-	// #END	
-	if (!Sessions->FindSessions(*LocalPlayer->GetPreferredUniqueNetId().GetUniqueNetId(), StaticCastSharedRef<FCommonOnlineSearchSettingsOSSv1>(SearchSettings.ToSharedRef())))
+
+	const FUniqueNetIdPtr LocalPlayerId = LocalPlayer->GetPreferredUniqueNetId().GetUniqueNetId();
+	if (!ensure(LocalPlayerId.IsValid()))
+	{
+		UE_LOG(LogCommonSession, Error, TEXT("LocalPlayerId is invalid"));
+		return;
+	}
+
+	const FOnFindSessionsCompleteDelegate OnFindSessionsCompleteDelegate = FOnFindSessionsCompleteDelegate::CreateUObject(this, &UCommonSessionSubsystem::OnFindSessionsComplete);
+	QuerySessionsCompleteDelegateHandle = SessionInterface->AddOnFindSessionsCompleteDelegate_Handle(OnFindSessionsCompleteDelegate);
+
+	if (!SessionInterface->FindSessions(LocalPlayerId.ToSharedRef().Get(), SearchSettings.ToSharedRef()))
 	{
 		// Some session search failures will call this delegate inside the function, others will not
 		OnFindSessionsComplete(false);
 	}
+	//#END
 }
 
 #else
@@ -1008,34 +1408,343 @@ void UCommonSessionSubsystem::StartSession()
 	UE_LOG(LogCommonSession, Warning, TEXT("UCommonSessionSubsystem::StartSession: Failed to start session, session state is not Pending. Current Session State: %s"), EOnlineSessionState::ToString(SessionState));
 }
 
+/** #START @AccelByte Custom session implementation */
+void UCommonSessionSubsystem::HostCustomSession(APlayerController* HostingPlayer, const FOnHostCustomSessionComplete& OnHostCustomSessionComplete)
+{
+	const ULocalPlayer* LocalPlayer = (HostingPlayer != nullptr) ? HostingPlayer->GetLocalPlayer() : nullptr;
+	if (!ensure(LocalPlayer != nullptr))
+	{
+		UE_LOG(LogCommonSession, Error, TEXT("HostingPlayer is invalid"));
+		return;
+	}
+
+	const FUniqueNetIdPtr LocalPlayerId = LocalPlayer->GetPreferredUniqueNetId().GetUniqueNetId();
+	if (!ensure(LocalPlayerId.IsValid()))
+	{
+		UE_LOG(LogCommonSession, Error, TEXT("LocalPlayerId is invalid"));
+		return;
+	}
+
+	RestoreAndLeaveActiveGameSessions(HostingPlayer, TDelegate<void(bool)>::CreateLambda([this, HostingPlayer, OnHostCustomSessionComplete](bool bWasSuccessful) {
+		if (bWasSuccessful)
+		{
+			CreateCustomGameSessionInternal(HostingPlayer, OnHostCustomSessionComplete);
+		}
+	}));
+}
+
+void UCommonSessionSubsystem::StartCustomSession(APlayerController* RequestingPlayer, const FOnHostCustomSessionComplete& OnComplete)
+{
+	const FOnlineSessionV2AccelBytePtr SessionInterface = GetSessionInterface();
+	EARLY_RETURN_IF_INVALID_WITH_DELEGATE(SessionInterface.IsValid(), "Session interface", false);
+
+	const FNamedOnlineSession* Session = SessionInterface->GetNamedSession(NAME_GameSession);
+	EARLY_RETURN_IF_INVALID_WITH_DELEGATE(Session != nullptr, "Current session", false);
+
+	const EAccelByteV2SessionConfigurationServerType ServerType =
+		StaticCastSharedPtr<FOnlineSessionInfoAccelByteV2>(Session->SessionInfo)->GetServerType();
+
+	FDelegateHandle UpdateHandler = SessionInterface->AddOnUpdateSessionCompleteDelegate_Handle(FOnUpdateSessionCompleteDelegate::CreateWeakLambda(this,
+        [SessionInterface, &UpdateHandler, OnComplete](FName SessionName, bool bWasSuccessful) {
+            if(SessionName != NAME_GameSession)
+            {
+            	return;
+            }
+
+            SessionInterface->ClearOnUpdateSessionCompleteDelegate_Handle(UpdateHandler);
+            OnComplete.ExecuteIfBound(bWasSuccessful);
+        }));
+
+	if(ServerType == EAccelByteV2SessionConfigurationServerType::DS)
+	{
+		FOnlineSessionSettings SessionSettings = Session->SessionSettings;
+
+		// #NOTE: Triggering a DS request by setting min players to the number of members in the session
+		SessionSettings.Set(SETTING_SESSION_MINIMUM_PLAYERS, Session->RegisteredPlayers.Num());
+
+		// #NOTE: This is only here because the backend wipes out the deployment setting if one is not provided on the PATCH endpoint
+		SessionSettings.Set(SETTING_GAMESESSION_DEPLOYMENT, TEXT("default"));
+
+		// TODO: Hardcoding this here is incorrect
+		FOnlineSessionSettingsAccelByte::Set(SessionSettings, SETTING_GAMESESSION_REQUESTEDREGIONS, {TEXT("us-east-1")});
+
+		SessionInterface->UpdateSession(NAME_GameSession, SessionSettings);
+	}
+	else if(ServerType == EAccelByteV2SessionConfigurationServerType::P2P)
+	{
+		FString MapName;
+		EARLY_RETURN_IF_INVALID_WITH_DELEGATE(Session->SessionSettings.Get(SETTING_MAPNAME, MapName) && !MapName.IsEmpty(), "Map name", false);
+		RequestingPlayer->ClientTravel(FString::Printf(TEXT("%s?listen"), *MapName), TRAVEL_Absolute);
+	}
+}
+
+bool UCommonSessionSubsystem::IsCustomSession(APlayerController* RequestingPlayer)
+{
+	const FOnlineSessionV2AccelBytePtr SessionInterface = GetSessionInterface();
+	EARLY_RETURN_IF_INVALID(SessionInterface.IsValid(), "Session interface", false);
+
+	const FNamedOnlineSession* Session = SessionInterface->GetNamedSession(NAME_GameSession);
+	EARLY_RETURN_IF_INVALID(Session != nullptr, "Current session", false);
+
+	bool bResult = false;
+	Session->SessionSettings.Get(SETTING_ISCUSTOMSESSION, bResult);
+
+	return bResult;
+}
+
+void UCommonSessionSubsystem::CreateCustomGameSessionInternal(const APlayerController* HostingPlayer, FOnHostCustomSessionComplete OnComplete)
+{
+	const FOnlineSessionV2AccelBytePtr SessionInterface = GetSessionInterface();
+	EARLY_RETURN_IF_INVALID_WITH_DELEGATE(SessionInterface.IsValid(), "Session interface", false);
+
+	const FOnlineIdentityAccelBytePtr IdentityInterface = GetIdentityInterface();
+	EARLY_RETURN_IF_INVALID_WITH_DELEGATE(IdentityInterface.IsValid(), "Identity interface", false);
+
+	const ULocalPlayer* LocalPlayer = HostingPlayer->GetLocalPlayer();
+	EARLY_RETURN_IF_INVALID_WITH_DELEGATE(LocalPlayer != nullptr, "Local player", false);
+
+	const FUniqueNetIdPtr HostingPlayerId = LocalPlayer->GetPreferredUniqueNetId().GetUniqueNetId();
+	EARLY_RETURN_IF_INVALID_WITH_DELEGATE(HostingPlayerId.IsValid(), "Hosting player ID", false);
+
+	FOnlineSessionSettings NewSessionSettings;
+	NewSessionSettings.Set(SETTING_SESSION_TYPE, SETTING_SESSION_TYPE_GAME_SESSION);
+	NewSessionSettings.Set(SETTING_SESSION_JOIN_TYPE, TEXT("OPEN"));
+	NewSessionSettings.Set(SETTING_SESSION_TEMPLATE_NAME, TEXT("LyraCustomGameSession"));
+	NewSessionSettings.Set(SETTING_GAMESESSION_DEPLOYMENT, TEXT("default"));
+	NewSessionSettings.Set(SETTING_ISCUSTOMSESSION, true);
+
+	// #NOTE Defaulting to DS server type
+	NewSessionSettings.Set(SETTING_SESSION_SERVER_TYPE, TEXT("DS"));
+	// #NOTE Defaulting to bots enabled
+	NewSessionSettings.Set(SETTING_BOTSENABLED, true);
+	// #NOTE HOSTNAME is the username of the hosting player
+	NewSessionSettings.Set(SETTING_HOSTNAME, IdentityInterface->GetPlayerNickname(HostingPlayerId.ToSharedRef().Get()));
+	
+	const TSharedRef<const FUniqueNetIdAccelByteUser> ABUser = FUniqueNetIdAccelByteUser::Cast(HostingPlayerId.ToSharedRef().Get());
+	const FString AccelByteId = ABUser->GetAccelByteId();
+
+	OnCreateCustomGameSessionHandle = SessionInterface->AddOnCreateSessionCompleteDelegate_Handle(
+		FOnCreateSessionCompleteDelegate::CreateUObject(this, &ThisClass::OnCreateCustomSessionComplete, AccelByteId, OnComplete));
+
+	bCreatingCustomSession = true;
+	const int32 HostingPlayerNum = LocalPlayer->GetControllerId();
+	SessionInterface->CreateSession(HostingPlayerNum, NAME_GameSession, NewSessionSettings);
+}
+
+void UCommonSessionSubsystem::OnCreateCustomSessionComplete(FName SessionName, bool bWasSuccessful, FString AccelByteId, FOnHostCustomSessionComplete OnComplete)
+{
+	if (SessionName != NAME_GameSession)
+	{
+		return;
+	}
+
+	const FOnlineSessionV2AccelBytePtr SessionInterface = GetSessionInterface();
+	EARLY_RETURN_IF_INVALID_WITH_DELEGATE(SessionInterface.IsValid(), "Session interface", false);
+
+	const auto OnTeamUpdateComplete = FOnCustomSessionUpdateComplete::CreateLambda([OnComplete](bool bWasSuccessful) {
+		OnComplete.ExecuteIfBound(bWasSuccessful);
+	});
+	SessionInterface->ClearOnCreateSessionCompleteDelegate_Handle(OnCreateCustomGameSessionHandle);
+
+	if(bWasSuccessful)
+	{
+		UE_LOG(LogCommonSession, Log, TEXT("Custom game session created"));
+		AddPlayerToCustomGameSessionTeam(AccelByteId, OnTeamUpdateComplete);
+
+		return;
+	}
+
+	OnComplete.ExecuteIfBound(false);
+}
+
+void UCommonSessionSubsystem::AddPlayerToCustomGameSessionTeam(const APlayerController* Player, const FOnAddPlayerToTeamComplete& OnComplete)
+{
+	const TSharedRef<const FUniqueNetIdAccelByteUser> ABUser = FUniqueNetIdAccelByteUser::Cast(
+		Player->GetLocalPlayer()->GetPreferredUniqueNetId().GetUniqueNetId().ToSharedRef().Get());
+	const FString AccelByteId = ABUser->GetAccelByteId();
+	AddPlayerToCustomGameSessionTeam(AccelByteId,
+		FOnCustomSessionUpdateComplete::CreateWeakLambda(this, [OnComplete](bool bWasSuccessful) {
+			OnComplete.ExecuteIfBound(bWasSuccessful);
+		}));
+}
+
+void UCommonSessionSubsystem::AddPlayerToCustomGameSessionTeam(const FString& PlayerAccelByteId, const FOnCustomSessionUpdateComplete& OnComplete)
+{
+	const FOnlineSessionV2AccelBytePtr SessionInterface = GetSessionInterface();
+	if (!ensure(SessionInterface.IsValid()))
+	{
+		UE_LOG(LogCommonSession, Error, TEXT("SessionInterface is invalid"));
+		return;
+	}
+
+	FNamedOnlineSession* CurrentSession = SessionInterface->GetNamedSession(NAME_GameSession);
+	if (!ensure(CurrentSession != nullptr))
+	{
+		UE_LOG(LogCommonSession, Error, TEXT("CurrentSession is invalid"));
+		return;
+	}
+
+	const TSharedPtr<FOnlineSessionInfoAccelByteV2> SessionInfo = StaticCastSharedPtr<FOnlineSessionInfoAccelByteV2>(CurrentSession->SessionInfo);
+	if (!ensure(SessionInfo.IsValid()))
+	{
+		UE_LOG(LogCommonSession, Error, TEXT("SessionInfo is invalid"));
+		return;
+	}
+
+	TArray<FAccelByteModelsV2GameSessionTeam> Teams = SessionInfo->GetTeamAssignments();
+	if(Teams.Num() == 0)
+	{
+		Teams.Add({});
+	}
+
+	/*const TSharedRef<const FUniqueNetIdAccelByteUser> ABUser = FUniqueNetIdAccelByteUser::Cast(PlayerId.ToSharedRef().Get());
+	const FString AccelByteId = ABUser->GetAccelByteId();*/
+
+	if(GetCurrentTeamIndex(Teams, PlayerAccelByteId) != -1)
+	{
+		OnComplete.ExecuteIfBound(true);
+		return;
+	}
+
+	Teams[0].UserIDs.Add(PlayerAccelByteId);
+
+	SessionInfo->SetTeamAssignments(Teams);
+
+	OnUpdateTeamsCompleteHandle = SessionInterface->AddOnUpdateSessionCompleteDelegate_Handle(FOnUpdateSessionCompleteDelegate::CreateWeakLambda(this,
+		[this, SessionInterface, OnComplete](FName SessionName, bool bWasSuccessful) {
+			if (SessionName != NAME_GameSession)
+			{
+				return;
+			}
+
+			OnComplete.ExecuteIfBound(bWasSuccessful);
+			SessionInterface->ClearOnUpdateSessionCompleteDelegate_Handle(OnUpdateTeamsCompleteHandle); 
+		}));
+	SessionInterface->UpdateSession(CurrentSession->SessionName, CurrentSession->SessionSettings);
+}
+
+void UCommonSessionSubsystem::OnUpdateCustomGameSessionComplete(FName SessionName, bool bWasSuccessful, FOnSetCustomGameSettingComplete OnSettingUpdateComplete)
+{
+	if (SessionName != NAME_GameSession || !bWasSuccessful)
+	{
+		return;
+	}
+
+	FOnlineSessionV2AccelBytePtr SessionInterface = nullptr;
+	if (!FOnlineSessionV2AccelByte::GetFromWorld(GetWorld(), SessionInterface))
+	{
+		return;
+	}
+
+	OnSettingUpdateComplete.ExecuteIfBound(bWasSuccessful);
+}
+
+int32 UCommonSessionSubsystem::GetCurrentTeamIndex(const TArray<FAccelByteModelsV2GameSessionTeam>& Teams, const FString& PlayerAccelByteId)
+{
+	int32 i = 0;
+	for(const auto& Team : Teams)
+	{
+		for(const auto& MemberId : Team.UserIDs)
+		{
+			if(MemberId.Equals(PlayerAccelByteId))
+			{
+				return i;
+			}
+		}
+		i++;
+	}
+
+	return -1;
+}
+
+/** #END */
+
 /** #START @AccelByte Implementation : Starts a process to matchmaking with other player. */
 void UCommonSessionSubsystem::MatchmakingSession(APlayerController* JoiningOrHostingPlayer, UCommonSession_HostSessionRequest* HostRequest, UCommonSession_SearchSessionRequest*& OutMatchmakingSessionRequest)
 {
 	UE_LOG(LogCommonSession, Log, TEXT("Matchmaking Requested"));
-	
-	if(SearchSettings.IsValid())
+#if AB_USE_V2_SESSIONS
+	const FOnlineSessionAccelBytePtr SessionInterface = GetSessionInterface();
+	ensure(SessionInterface.IsValid());
+
+	// Create a new search handle to pass to start matchmaking
+	TSharedRef<FOnlineSessionSearch> NewSearchHandle = MakeShared<FOnlineSessionSearch>();
+
+	NewSearchHandle->QuerySettings.Set(SETTING_SESSION_MATCHPOOL, HostRequest->ModeNameForAdvertisement, EOnlineComparisonOp::Equals);
+	NewSearchHandle->QuerySettings.Set(SETTING_MAPNAME, HostRequest->GetMapName(), EOnlineComparisonOp::Equals);
+
+	ULocalPlayer* LocalPlayer = (JoiningOrHostingPlayer != nullptr) ? JoiningOrHostingPlayer->GetLocalPlayer() : nullptr;
+	if (!ensure(LocalPlayer != nullptr))
+	{
+		UE_LOG(LogCommonSession, Error, TEXT("JoiningOrHostingPlayer is invalid"));
+		return;
+	}
+
+	const FUniqueNetIdPtr LocalPlayerId = LocalPlayer->GetPreferredUniqueNetId().GetUniqueNetId();
+	if (!ensure(LocalPlayerId.IsValid()))
+	{
+		UE_LOG(LogCommonSession, Error, TEXT("LocalPlayerId is invalid"));
+		return;
+	}
+
+	const FOnStartMatchmakingComplete OnStartMatchmakingCompleteDelegate = FOnStartMatchmakingComplete::CreateUObject(this, &UCommonSessionSubsystem::OnStartMatchmakingComplete);
+	if (SessionInterface->StartMatchmaking(USER_ID_TO_MATCHMAKING_USER_ARRAY(LocalPlayerId.ToSharedRef()), NAME_GameSession, FOnlineSessionSettings(), NewSearchHandle, OnStartMatchmakingCompleteDelegate))
+	{
+		// Set search handle to our new instance here, as the start matchmaking call will modify it
+		CurrentMatchmakingSearchHandle = NewSearchHandle;
+	}
+#else 
+	if (SearchSettings.IsValid())
 	{
 		UE_LOG(LogCommonSession, Log, TEXT("Matchmaking Search Session already in progress. Aborting this request!"));
 		return;
 	}
-	
+
 	if (HostRequest == nullptr)
 	{
 		UE_LOG(LogCommonSession, Error, TEXT("Matchmaking passed a null request"));
 		return;
 	}
-	
+
 	TStrongObjectPtr<UCommonSession_HostSessionRequest> HostRequestPtr = TStrongObjectPtr<UCommonSession_HostSessionRequest>(HostRequest);
 	TWeakObjectPtr<APlayerController> JoiningOrHostingPlayerPtr = TWeakObjectPtr<APlayerController>(JoiningOrHostingPlayer);
 
 	OutMatchmakingSessionRequest = CreateOnlineSearchSessionRequest();
 	OutMatchmakingSessionRequest->OnSearchFinished.AddUObject(this, &UCommonSessionSubsystem::HandleMatchmakingFinished, JoiningOrHostingPlayerPtr, HostRequestPtr);
-	
+
 	FindSessionsInternal(JoiningOrHostingPlayer, CreateMatchmakingSearchSettings(HostRequest, OutMatchmakingSessionRequest));
+#endif
 }
 
 void UCommonSessionSubsystem::CancelMatchmakingSession(APlayerController* CancelPlayer)
-{	
+{
+#if AB_USE_V2_SESSIONS
+	if (!CurrentMatchmakingSearchHandle.IsValid())
+	{
+		UE_LOG(LogCommonSession, Error, TEXT("CurrentMatchmakingSearchHandle is invalid"));
+		return;
+	}
+
+	const FOnlineSessionAccelBytePtr SessionInterface = GetSessionInterface();
+	ensure(SessionInterface.IsValid());
+
+	ULocalPlayer* LocalPlayer = (CancelPlayer != nullptr) ? CancelPlayer->GetLocalPlayer() : nullptr;
+	if (!ensure(LocalPlayer != nullptr))
+	{
+		UE_LOG(LogCommonSession, Error, TEXT("CancelPlayer is invalid"));
+		return;
+	}
+
+	const FUniqueNetIdPtr LocalPlayerId = LocalPlayer->GetPreferredUniqueNetId().GetUniqueNetId();
+	if (!ensure(LocalPlayerId.IsValid()))
+	{
+		UE_LOG(LogCommonSession, Error, TEXT("LocalPlayerId is invalid"));
+		return;
+	}
+
+	CurrentMatchmakingSearchHandle.Reset();
+	SessionInterface->CancelMatchmaking(LocalPlayerId.ToSharedRef().Get(), NAME_GameSession);
+#else 
 	IOnlineSubsystem* OnlineSub = Online::GetSubsystem(GetWorld());
 	check(OnlineSub);
 	IOnlineSessionPtr Sessions = OnlineSub->GetSessionInterface();
@@ -1044,11 +1753,24 @@ void UCommonSessionSubsystem::CancelMatchmakingSession(APlayerController* Cancel
 	SearchSettings.Reset();
 
 	int32 LocalPlayerIndex = CancelPlayer->GetLocalPlayer()->GetLocalPlayerIndex();
-	
+
 	Sessions->CancelMatchmaking(LocalPlayerIndex, NAME_GameSession);
+#endif
 }
 
 // #END
+
+void UCommonSessionSubsystem::InviteToCustomSession(const APlayerController* SendingPlayer, const FUniqueNetIdRepl ReceivingPlayerId)
+{
+	const FOnlineSessionAccelBytePtr SessionInterface = GetSessionInterface();
+	ensure(SessionInterface.IsValid());
+
+	const FNamedOnlineSession* Session = SessionInterface->GetNamedSession(NAME_GameSession);
+	ensure(Session != nullptr);
+
+	SessionInterface->SendSessionInviteToFriend(SendingPlayer->GetLocalPlayer()->GetControllerId(),
+		NAME_GameSession, ReceivingPlayerId.GetUniqueNetId().ToSharedRef().Get());
+}
 
 TSharedRef<FCommonOnlineSearchSettings> UCommonSessionSubsystem::CreateQuickPlaySearchSettings(UCommonSession_HostSessionRequest* HostRequest, UCommonSession_SearchSessionRequest* SearchRequest)
 {
@@ -1083,26 +1805,10 @@ TSharedRef<FCommonOnlineSearchSettings> UCommonSessionSubsystem::CreateQuickPlay
 TSharedRef<FCommonOnlineSearchSettings> UCommonSessionSubsystem::CreateMatchmakingSearchSettings(
 	UCommonSession_HostSessionRequest* Request, UCommonSession_SearchSessionRequest* SearchRequest)
 {
-	// Allow to override client version
-	FString CmdArgs = FCommandLine::Get();
-	FString ClientVersion;
-	FParse::Value(FCommandLine::Get(), TEXT("ClientVersion="), ClientVersion);
-	if(ClientVersion.IsEmpty())
-	{
-		GConfig->GetString(
-			TEXT("/Script/EngineSettings.GeneralProjectSettings"),
-			TEXT("ProjectVersion"),
-			ClientVersion,
-			GGameIni
-		);
-		CmdArgs.Append(*FString::Printf(TEXT(" -ClientVersion=%s"), *ClientVersion));
-		FCommandLine::Set(*CmdArgs);
-	}
-	
 	TSharedRef<FCommonOnlineSearchSettingsOSSv1> MatchmakingSearch = MakeShared<FCommonOnlineSearchSettingsOSSv1>(SearchRequest);
 
-	MatchmakingSearch->QuerySettings.Set(SETTING_GAMEMODE, Request->AccelByteGameMode, EOnlineComparisonOp::Equals);
-	MatchmakingSearch->QuerySettings.Set(SEARCH_MATCHMAKING_QUEUE, Request->AccelByteGameMode, EOnlineComparisonOp::Equals);
+	MatchmakingSearch->QuerySettings.Set(SETTING_GAMEMODE, Request->MatchPool, EOnlineComparisonOp::Equals);
+	MatchmakingSearch->QuerySettings.Set(SEARCH_MATCHMAKING_QUEUE, Request->MatchPool, EOnlineComparisonOp::Equals);
 	MatchmakingSearch->QuerySettings.Set(SEARCH_DEDICATED_ONLY, true, EOnlineComparisonOp::Equals);
 	MatchmakingSearch->QuerySettings.Set(SETTING_MAPNAME, Request->GetMapName(), EOnlineComparisonOp::Equals);
 	FString* NumBots = Request->ExtraArgs.Find(TEXT("NumBots"));
@@ -1178,6 +1884,7 @@ void UCommonSessionSubsystem::HandleMatchmakingFinished(bool bSucceeded, const F
 		{
 			for (UCommonSession_SearchResult* Result : SearchSettings->SearchRequest->Results)
 			{
+				// #NOTE Here we will need to wait until the server has finished obtaining game session details before attempting to join the session?
 				JoinSession(JoiningOrHostingPlayer.Get(), Result);
 				return;
 			}
@@ -1186,6 +1893,144 @@ void UCommonSessionSubsystem::HandleMatchmakingFinished(bool bSucceeded, const F
 
 	// Fail, cleanup session
 	CleanUpSessions();
+}
+
+FOnlineSessionAccelBytePtr UCommonSessionSubsystem::GetSessionInterface() const
+{
+	const IOnlineSubsystem* Subsystem = Online::GetSubsystem(GetWorld());
+	if (!ensure(Subsystem != nullptr))
+	{
+		return nullptr;
+	}
+
+	return StaticCastSharedPtr<FOnlineSessionV2AccelByte>(Subsystem->GetSessionInterface());
+}
+
+IOnlineUserPtr UCommonSessionSubsystem::GetUserInterface() const
+{
+	const IOnlineSubsystem* Subsystem = Online::GetSubsystem(GetWorld());
+	if (!ensure(Subsystem != nullptr))
+	{
+		return nullptr;
+	}
+
+	return Subsystem->GetUserInterface();
+}
+
+FOnlineIdentityAccelBytePtr UCommonSessionSubsystem::GetIdentityInterface() const
+{
+	const IOnlineSubsystem* Subsystem = Online::GetSubsystem(GetWorld());
+	if (!ensure(Subsystem != nullptr))
+	{
+		return nullptr;
+	}
+
+	return StaticCastSharedPtr<FOnlineIdentityAccelByte>(Subsystem->GetIdentityInterface());;
+}
+
+FString UCommonSessionSubsystem::GetLocalSessionAddress() const
+{
+	// Grab local IP and port to associate with this session. Start with local IP from socket subsystem.
+	ISocketSubsystem* SocketSubsystem = ISocketSubsystem::Get(PLATFORM_SOCKETSUBSYSTEM);
+	if (SocketSubsystem == nullptr)
+	{
+		return TEXT("");
+	}
+
+	bool bCanBindAll;
+	TSharedPtr<FInternetAddr> LocalIP = SocketSubsystem->GetLocalHostAddr(*GLog, bCanBindAll);
+	if (!LocalIP.IsValid())
+	{
+		return TEXT("");
+	}
+
+	const FString IpString = LocalIP->ToString(false);
+
+	// Then grab the currently bound port from the world
+	UWorld* World = GetWorld();
+	if (!ensure(World != nullptr))
+	{
+		return TEXT("");
+	}
+
+	const int32 Port = World->URL.Port;
+	return FString::Printf(TEXT("%s:%d"), *IpString, Port);
+}
+
+void UCommonSessionSubsystem::RestoreAndLeaveActiveGameSessions(APlayerController* Player, const TDelegate<void(bool)>& OnRestoreAndLeaveAllComplete)
+{
+	FOnlineSessionV2AccelBytePtr SessionInterface;
+	if (!FOnlineSessionV2AccelByte::GetFromWorld(GetWorld(), SessionInterface))
+	{
+		UE_LOG(LogCommonSession, Error, TEXT("Failed get session interface from world"));
+		OnRestoreAndLeaveAllComplete.ExecuteIfBound(false);
+		return;
+	}
+
+	const ULocalPlayer* LocalPlayer = (Player != nullptr) ? Player->GetLocalPlayer() : nullptr;
+	if (!ensure(LocalPlayer != nullptr))
+	{
+		UE_LOG(LogCommonSession, Error, TEXT("HostingPlayer is invalid"));
+		return;
+	}
+
+	const FUniqueNetIdPtr LocalPlayerId = LocalPlayer->GetPreferredUniqueNetId().GetUniqueNetId();
+	if (!ensure(LocalPlayerId.IsValid()))
+	{
+		UE_LOG(LogCommonSession, Error, TEXT("LocalPlayerId is invalid"));
+		return;
+	}
+
+	const FOnRestoreActiveSessionsComplete OnRestoreActiveSessionsCompleteDelegate = FOnRestoreActiveSessionsComplete::CreateUObject(this, &UCommonSessionSubsystem::OnRestoreAllSessionsComplete, OnRestoreAndLeaveAllComplete);
+	SessionInterface->RestoreActiveSessions(LocalPlayerId.ToSharedRef().Get(), OnRestoreActiveSessionsCompleteDelegate);
+}
+
+void UCommonSessionSubsystem::OnRestoreAllSessionsComplete(const FUniqueNetId& LocalUserId, const FOnlineError& Result, TDelegate<void(bool)> OnRestoreAndLeaveAllComplete)
+{
+	if (!Result.bSucceeded)
+	{
+		UE_LOG(LogCommonSession, Error, TEXT("Failed restore sessions for player %s"), *LocalUserId.ToDebugString());
+		OnRestoreAndLeaveAllComplete.ExecuteIfBound(false);
+		return;
+	}
+
+	FOnlineSessionV2AccelBytePtr SessionInterface;
+	if (!FOnlineSessionV2AccelByte::GetFromWorld(GetWorld(), SessionInterface))
+	{
+		UE_LOG(LogCommonSession, Error, TEXT("Failed get session interface from world"));
+		OnRestoreAndLeaveAllComplete.ExecuteIfBound(false);
+		return;
+	}
+
+	TArray<FOnlineRestoredSessionAccelByte> RestoredGameSessions = SessionInterface->GetAllRestoredGameSessions();
+
+	NumberOfRestoredSessionsToLeave = RestoredGameSessions.Num();
+	if (NumberOfRestoredSessionsToLeave <= 0)
+	{
+		OnRestoreAndLeaveAllComplete.ExecuteIfBound(true);
+		return;
+	}
+
+	for (const FOnlineRestoredSessionAccelByte& RestoredSession : RestoredGameSessions)
+	{
+		const FOnLeaveSessionComplete OnLeaveRestoredSessionCompleteDelegate = FOnLeaveSessionComplete::CreateUObject(this, &UCommonSessionSubsystem::OnLeaveRestoredGameSessionComplete, OnRestoreAndLeaveAllComplete);
+		SessionInterface->LeaveRestoredSession(LocalUserId, RestoredSession, OnLeaveRestoredSessionCompleteDelegate);
+	}
+}
+
+void UCommonSessionSubsystem::OnLeaveRestoredGameSessionComplete(bool bWasSuccessful, FString SessionId, TDelegate<void(bool)> OnRestoreAndLeaveAllComplete)
+{
+	if (!bWasSuccessful)
+	{
+		UE_LOG(LogCommonSession, Error, TEXT("Failed to leave restored session with ID '%s'"), *SessionId);
+		OnRestoreAndLeaveAllComplete.ExecuteIfBound(false);
+		return;
+	}
+
+	if (--NumberOfRestoredSessionsToLeave <= 0)
+	{
+		OnRestoreAndLeaveAllComplete.ExecuteIfBound(true);
+	}
 }
 
 void UCommonSessionSubsystem::CleanUpSessions()
@@ -1197,6 +2042,268 @@ void UCommonSessionSubsystem::CleanUpSessions()
 #else
 	CleanUpSessionsOSSv2();
 #endif // COMMONUSER_OSSV1
+}
+
+void UCommonSessionSubsystem::LeaveCurrentGameSession(APlayerController* LeavingPlayer, const FOnLeaveCurrentGameSession& OnComplete)
+{
+	const FOnlineSessionV2AccelBytePtr SessionInterface = GetSessionInterface();
+	EARLY_RETURN_IF_INVALID_WITH_DELEGATE(SessionInterface.IsValid(), "Session interface", false);
+
+	const FOnDestroySessionCompleteDelegate OnDestroySessionCompleteDelegate = FOnDestroySessionCompleteDelegate::CreateWeakLambda(this, [OnComplete](FName, bool bWasSuccessful) {
+		OnComplete.ExecuteIfBound(bWasSuccessful);
+	});
+	SessionInterface->DestroySession(NAME_GameSession, OnDestroySessionCompleteDelegate);
+}
+
+void UCommonSessionSubsystem::SetCustomGameSessionNetworkMode(APlayerController* UpdatingPlayer, const ECommonSessionOnlineServerType& NetworkMode, const FOnSetCustomGameSettingComplete& OnSettingUpdateComplete)
+{
+	FOnlineSessionV2AccelBytePtr SessionInterface = nullptr;
+	if (!FOnlineSessionV2AccelByte::GetFromWorld(GetWorld(), SessionInterface))
+	{
+		return;
+	}
+
+	FNamedOnlineSession* CurrentSession = SessionInterface->GetNamedSession(NAME_GameSession);
+	if (!ensure(CurrentSession != nullptr))
+	{
+		return;
+	}
+
+	switch (NetworkMode)
+	{
+	case ECommonSessionOnlineServerType::Dedicated:
+		CurrentSession->SessionSettings.Set(SETTING_SESSION_SERVER_TYPE, TEXT("DS"));
+		break;
+	case ECommonSessionOnlineServerType::P2P:
+		CurrentSession->SessionSettings.Set(SETTING_SESSION_SERVER_TYPE, TEXT("P2P"));
+		break;
+	case ECommonSessionOnlineServerType::NONE:
+		CurrentSession->SessionSettings.Set(SETTING_SESSION_SERVER_TYPE, TEXT("NONE"));
+		break;
+	}
+
+	OnUpdateNetworkModeCompleteHandle = SessionInterface->AddOnUpdateSessionCompleteDelegate_Handle(FOnUpdateSessionCompleteDelegate::CreateWeakLambda(this, [this, SessionInterface, OnSettingUpdateComplete](FName SessionName, bool bWasSuccessful) {
+		if (SessionName != NAME_GameSession || !bWasSuccessful)
+		{
+			return;
+		}
+
+		OnSettingUpdateComplete.ExecuteIfBound(bWasSuccessful);
+		SessionInterface->ClearOnUpdateSessionCompleteDelegate_Handle(OnUpdateNetworkModeCompleteHandle);
+	}));
+	SessionInterface->UpdateSession(CurrentSession->SessionName, CurrentSession->SessionSettings);
+}
+
+void UCommonSessionSubsystem::SetCustomGameSessionBotsEnabled(APlayerController* UpdatingPlayer, bool bBotsEnabled, const FOnSetCustomGameSettingComplete& OnSettingUpdateComplete)
+{
+	FOnlineSessionV2AccelBytePtr SessionInterface = nullptr;
+	if (!FOnlineSessionV2AccelByte::GetFromWorld(GetWorld(), SessionInterface))
+	{
+		return;
+	}
+
+	FNamedOnlineSession* CurrentSession = SessionInterface->GetNamedSession(NAME_GameSession);
+	if (!ensure(CurrentSession != nullptr))
+	{
+		return;
+	}
+
+	CurrentSession->SessionSettings.Set(SETTING_BOTSENABLED, bBotsEnabled);
+
+	OnUpdateBotsEnabledCompleteHandle = SessionInterface->AddOnUpdateSessionCompleteDelegate_Handle(FOnUpdateSessionCompleteDelegate::CreateWeakLambda(this, [this, SessionInterface, OnSettingUpdateComplete](FName SessionName, bool bWasSuccessful) {
+		if (SessionName != NAME_GameSession || !bWasSuccessful)
+		{
+			return;
+		}
+
+		OnSettingUpdateComplete.ExecuteIfBound(bWasSuccessful);
+		SessionInterface->ClearOnUpdateSessionCompleteDelegate_Handle(OnUpdateBotsEnabledCompleteHandle);
+	}));
+	SessionInterface->UpdateSession(CurrentSession->SessionName, CurrentSession->SessionSettings);
+}
+
+void UCommonSessionSubsystem::SetCustomGameSessionMap(const FPrimaryAssetId& MapId, const FName& ExperienceAssetName, const FString& ExperienceName, const FOnSetCustomGameSettingComplete& OnComplete)
+{
+	const FOnlineSessionV2AccelBytePtr SessionInterface = GetSessionInterface();
+	EARLY_RETURN_IF_INVALID_WITH_DELEGATE(SessionInterface.IsValid(), "Session interface", false);
+
+	FNamedOnlineSession* CurrentSession = SessionInterface->GetNamedSession(NAME_GameSession);
+	EARLY_RETURN_IF_INVALID_WITH_DELEGATE(CurrentSession != nullptr, "Current session", false);
+
+	FAssetData MapAssetData;
+	EARLY_RETURN_IF_INVALID_WITH_DELEGATE(UAssetManager::Get().GetPrimaryAssetData(MapId, MapAssetData), "Map asset data", false);
+
+	CurrentSession->SessionSettings.Set(SETTING_MAPNAME, MapAssetData.PackageName.ToString());
+	CurrentSession->SessionSettings.Set(SETTING_SESSION_MATCHPOOL, ExperienceAssetName.ToString());
+
+	// TODO: This should maybe be the name of the map rather than the name of the experience?
+	CurrentSession->SessionSettings.Set(SETTING_CUSTOMSESSION_EXPERIENCENAME, ExperienceName);
+	
+	OnUpdateMapCompleteHandle = SessionInterface->AddOnUpdateSessionCompleteDelegate_Handle(FOnUpdateSessionCompleteDelegate::CreateWeakLambda(this, [this, SessionInterface, OnComplete](FName SessionName, bool bWasSuccessful) {
+		if (SessionName != NAME_GameSession)
+		{
+			return;
+		}
+
+		OnComplete.ExecuteIfBound(bWasSuccessful);
+		SessionInterface->ClearOnUpdateSessionCompleteDelegate_Handle(OnUpdateMapCompleteHandle);
+	}));
+	SessionInterface->UpdateSession(CurrentSession->SessionName, CurrentSession->SessionSettings);
+}
+
+FString UCommonSessionSubsystem::GetCustomGameSessionNetworkModeString(APlayerController* QueryingPlayer)
+{
+	const FOnlineSessionV2AccelBytePtr SessionInterface = GetSessionInterface();
+	EARLY_RETURN_IF_INVALID(SessionInterface.IsValid(), "Session interface", {});
+
+	const FNamedOnlineSession* CurrentSession = SessionInterface->GetNamedSession(NAME_GameSession);
+	EARLY_RETURN_IF_INVALID(CurrentSession != nullptr, "Current session", {});
+
+	const TSharedPtr<FOnlineSessionInfoAccelByteV2> SessionInfo
+		= StaticCastSharedPtr<FOnlineSessionInfoAccelByteV2>(CurrentSession->SessionInfo);
+	EARLY_RETURN_IF_INVALID(SessionInfo.IsValid(), "Session info", {});
+
+	return SessionInterface->GetServerTypeAsString(SessionInfo->GetServerType());
+}
+
+FString UCommonSessionSubsystem::GetCustomGameSessionBotsEnabledString(APlayerController* QueryingPlayer)
+{
+	FOnlineSessionV2AccelBytePtr SessionInterface = nullptr;
+	if (!FOnlineSessionV2AccelByte::GetFromWorld(GetWorld(), SessionInterface))
+	{
+		UE_LOG(LogCommonSession, Error, TEXT("SessionInterface is invalid"));
+		return {};
+	}
+
+	const FNamedOnlineSession* CurrentSession = SessionInterface->GetNamedSession(NAME_GameSession);
+	if (!ensure(CurrentSession != nullptr))
+	{
+		UE_LOG(LogCommonSession, Error, TEXT("CurrentSession is invalid"));
+		return {};
+	}
+
+	bool Result;
+	if(CurrentSession->SessionSettings.Get(SETTING_BOTSENABLED, Result))
+	{
+		return Result ? TEXT("Enabled") : TEXT("Disabled");
+	}
+
+	return {};
+}
+
+FString UCommonSessionSubsystem::GetCustomGameSessionMapNameString(APlayerController* QueryingPlayer)
+{
+	FOnlineSessionV2AccelBytePtr SessionInterface = nullptr;
+	if (!FOnlineSessionV2AccelByte::GetFromWorld(GetWorld(), SessionInterface))
+	{
+		UE_LOG(LogCommonSession, Error, TEXT("SessionInterface is invalid"));
+		return {};
+	}
+
+	const FNamedOnlineSession* CurrentSession = SessionInterface->GetNamedSession(NAME_GameSession);
+	if (!ensure(CurrentSession != nullptr))
+	{
+		UE_LOG(LogCommonSession, Error, TEXT("CurrentSession is invalid"));
+		return {};
+	}
+
+	FString Result;
+	if(CurrentSession->SessionSettings.Get(SETTING_CUSTOMSESSION_EXPERIENCENAME, Result))
+	{
+		return Result;
+	}
+
+	return {};
+}
+
+void UCommonSessionSubsystem::ChangeCustomSessionTeam(APlayerController* UpdatingPlayer, const ECommonSessionTeamChangeDirection& Direction, const FOnSetCustomGameSettingComplete& OnTeamChangeComplete)
+{
+	FOnlineSessionV2AccelBytePtr SessionInterface = nullptr;
+	if (!FOnlineSessionV2AccelByte::GetFromWorld(GetWorld(), SessionInterface))
+	{
+		UE_LOG(LogCommonSession, Error, TEXT("SessionInterface is invalid"));
+		return;
+	}
+
+	FNamedOnlineSession* CurrentSession = SessionInterface->GetNamedSession(NAME_GameSession);
+	if (!ensure(CurrentSession != nullptr))
+	{
+		UE_LOG(LogCommonSession, Error, TEXT("CurrentSession is invalid"));
+		return;
+	}
+
+	const TSharedPtr<FOnlineSessionInfoAccelByteV2> SessionInfo = StaticCastSharedPtr<FOnlineSessionInfoAccelByteV2>(CurrentSession->SessionInfo);
+	if (!ensure(SessionInfo.IsValid()))
+	{
+		UE_LOG(LogCommonSession, Error, TEXT("SessionInfo is invalid"));
+		return;
+	}
+
+	const ULocalPlayer* LocalPlayer = (UpdatingPlayer != nullptr) ? UpdatingPlayer->GetLocalPlayer() : nullptr;
+	if (!ensure(LocalPlayer != nullptr))
+	{
+		UE_LOG(LogCommonSession, Error, TEXT("UpdatingPlayer is invalid"));
+		return;
+	}
+
+	const FUniqueNetIdPtr LocalPlayerId = LocalPlayer->GetPreferredUniqueNetId().GetUniqueNetId();
+	if (!ensure(LocalPlayerId.IsValid()))
+	{
+		UE_LOG(LogCommonSession, Error, TEXT("LocalPlayerId is invalid"));
+		return;
+	}
+
+	const TSharedRef<const FUniqueNetIdAccelByteUser> ABUser = FUniqueNetIdAccelByteUser::Cast(*LocalPlayerId);
+	const FString AccelByteId = ABUser->GetAccelByteId();
+
+	TArray<FAccelByteModelsV2GameSessionTeam> Teams = SessionInfo->GetTeamAssignments();
+	const int32 OldTeamIndex = GetCurrentTeamIndex(Teams, AccelByteId);
+	int32 NewTeamIndex = OldTeamIndex;
+
+	if(!ensure(OldTeamIndex != -1))
+	{
+		UE_LOG(LogCommonSession, Error, TEXT("TeamIndex is invalid"));
+		return;
+	}
+
+	if(Direction == ECommonSessionTeamChangeDirection::NEXT)
+	{
+		NewTeamIndex++;
+	}
+	else
+	{
+		NewTeamIndex--;
+	}
+
+	NewTeamIndex = FMath::Clamp(NewTeamIndex, 0, 2);
+
+	for(int32 i = Teams.Num(); i <= NewTeamIndex; i++)
+	{
+		Teams.Add({});
+	}
+
+	if(NewTeamIndex == OldTeamIndex)
+	{
+		OnTeamChangeComplete.ExecuteIfBound(true);
+		return;
+	}
+
+	Teams[OldTeamIndex].UserIDs.Remove(AccelByteId);
+	Teams[NewTeamIndex].UserIDs.Add(AccelByteId);
+
+	SessionInfo->SetTeamAssignments(Teams);
+
+	OnUpdateTeamsCompleteHandle = SessionInterface->AddOnUpdateSessionCompleteDelegate_Handle(FOnUpdateSessionCompleteDelegate::CreateWeakLambda(this,
+		[this, SessionInterface, OnTeamChangeComplete](FName SessionName, bool bWasSuccessful) {
+			if (SessionName != NAME_GameSession)
+			{
+				return;
+			}
+
+			OnTeamChangeComplete.ExecuteIfBound(bWasSuccessful);
+			SessionInterface->ClearOnUpdateSessionCompleteDelegate_Handle(OnUpdateTeamsCompleteHandle);
+		}));
+	SessionInterface->UpdateSession(CurrentSession->SessionName, CurrentSession->SessionSettings);
 }
 
 #if COMMONUSER_OSSV1
@@ -1284,9 +2391,13 @@ void UCommonSessionSubsystem::OnFindSessionsComplete(bool bWasSuccessful)
 	{
 		SearchSettingsV1.SearchRequest->Results.Reset(SearchSettingsV1.SearchResults.Num());
 
-		for (const FOnlineSessionSearchResult& Result : SearchSettingsV1.SearchResults)
+		for (FOnlineSessionSearchResult& Result : SearchSettingsV1.SearchResults)
 		{
 			UCommonSession_SearchResult* Entry = NewObject<UCommonSession_SearchResult>(SearchSettingsV1.SearchRequest);
+
+			// Set owning username as the host name found in the session settings
+			Result.Session.SessionSettings.Get(SETTING_HOSTNAME, Result.Session.OwningUserName);
+
 			Entry->Result = Result;
 			SearchSettingsV1.SearchRequest->Results.Add(Entry);
 			FString OwningUserId = TEXT("Unknown");
@@ -1325,12 +2436,16 @@ void UCommonSessionSubsystem::OnFindSessionsComplete(bool bWasSuccessful)
 			SearchSettingsV1.SearchRequest->Results.Add(Entry);
 		}
 	}
-	
+
 	SearchSettingsV1.SearchRequest->NotifySearchFinished(bWasSuccessful, bWasSuccessful ? FText() : LOCTEXT("Error_FindSessionV1Failed", "Find session failed"));
 	SearchSettings.Reset();
+
+	const FOnlineSessionAccelBytePtr SessionInterface = GetSessionInterface();
+	ensure(SessionInterface.IsValid());
+
+	SessionInterface->ClearOnFindSessionsCompleteDelegate_Handle(QuerySessionsCompleteDelegateHandle);
 }
 #endif // COMMONUSER_OSSV1
-
 
 void UCommonSessionSubsystem::JoinSession(APlayerController* JoiningPlayer, UCommonSession_SearchResult* Request)
 {
@@ -1340,53 +2455,79 @@ void UCommonSessionSubsystem::JoinSession(APlayerController* JoiningPlayer, UCom
 		return;
 	}
 
+	JoinSessionInternal(JoiningPlayer, Request);
+}
+
+void UCommonSessionSubsystem::JoinSessionInternal(APlayerController* JoiningPlayer, UCommonSession_SearchResult* Request)
+{
 	ULocalPlayer* LocalPlayer = (JoiningPlayer != nullptr) ? JoiningPlayer->GetLocalPlayer() : nullptr;
-	if (LocalPlayer == nullptr)
+	if (!ensure(LocalPlayer != nullptr))
 	{
 		UE_LOG(LogCommonSession, Error, TEXT("JoiningPlayer is invalid"));
 		return;
 	}
 
-	JoinSessionInternal(LocalPlayer, Request);
-}
-
-void UCommonSessionSubsystem::JoinSessionInternal(ULocalPlayer* LocalPlayer, UCommonSession_SearchResult* Request)
-{
 #if COMMONUSER_OSSV1
-	JoinSessionInternalOSSv1(LocalPlayer, Request);
+	JoinSessionInternalOSSv1(JoiningPlayer, LocalPlayer, Request);
 #else
 	JoinSessionInternalOSSv2(LocalPlayer, Request);
 #endif // COMMONUSER_OSSV1
 }
 
 #if COMMONUSER_OSSV1
-void UCommonSessionSubsystem::JoinSessionInternalOSSv1(ULocalPlayer* LocalPlayer, UCommonSession_SearchResult* Request)
+void UCommonSessionSubsystem::JoinSessionInternalOSSv1(APlayerController* JoiningPlayer, ULocalPlayer* LocalPlayer, UCommonSession_SearchResult* Request)
 {
-	IOnlineSubsystem* OnlineSub = Online::GetSubsystem(GetWorld());
-	check(OnlineSub);
-	IOnlineSessionPtr Sessions = OnlineSub->GetSessionInterface();
-	check(Sessions);
+	const FOnlineSessionAccelBytePtr SessionInterface = GetSessionInterface();
+	ensure(SessionInterface.IsValid());
 
-	Sessions->JoinSession(*LocalPlayer->GetPreferredUniqueNetId().GetUniqueNetId(), NAME_GameSession, Request->Result);
+	EAccelByteV2SessionType SessionType = SessionInterface->GetSessionTypeFromSettings(Request->Result.Session.SessionSettings);
+	if (SessionType != EAccelByteV2SessionType::GameSession)
+	{
+		return;
+	}
+
+	// Check if we already have a game session that we are in, if so, destroy it to join this one
+	if (SessionInterface->GetNamedSession(NAME_GameSession) != nullptr)
+	{
+		const FOnDestroySessionCompleteDelegate OnDestroySessionForJoinCompleteDelegate = FOnDestroySessionCompleteDelegate::CreateUObject(this, &UCommonSessionSubsystem::OnDestroySessionForJoinComplete, Request, JoiningPlayer);
+		SessionInterface->DestroySession(NAME_GameSession, OnDestroySessionForJoinCompleteDelegate);
+	}
+
+	// Register a delegate for joining the specified session
+	const FOnJoinSessionCompleteDelegate OnJoinSessionCompleteDelegate = FOnJoinSessionCompleteDelegate::CreateUObject(this, &UCommonSessionSubsystem::OnJoinSessionComplete);
+	JoinSessionDelegateHandle = SessionInterface->AddOnJoinSessionCompleteDelegate_Handle(OnJoinSessionCompleteDelegate);
+
+	const FUniqueNetIdPtr LocalPlayerId = LocalPlayer->GetPreferredUniqueNetId().GetUniqueNetId();
+	if (!ensure(LocalPlayerId.IsValid()))
+	{
+		UE_LOG(LogCommonSession, Error, TEXT("LocalPlayerId is invalid"));
+		return;
+	}
+
+	SessionInterface->JoinSession(LocalPlayerId.ToSharedRef().Get(), NAME_GameSession, Request->Result);
 }
 
 void UCommonSessionSubsystem::OnJoinSessionComplete(FName SessionName, EOnJoinSessionCompleteResult::Type Result)
 {
-	// Add any splitscreen players if they exist
-	//@TODO:
-// 	if (Result == EOnJoinSessionCompleteResult::Success && LocalPlayers.Num() > 1)
-// 	{
-// 		IOnlineSessionPtr Sessions = Online::GetSessionInterface(GetWorld());
-// 		if (Sessions.IsValid() && LocalPlayers[1]->GetPreferredUniqueNetId().IsValid())
-// 		{
-// 			Sessions->RegisterLocalPlayer(*LocalPlayers[1]->GetPreferredUniqueNetId(), NAME_GameSession,
-// 				FOnRegisterLocalPlayerCompleteDelegate::CreateUObject(this, &UShooterGameInstance::OnRegisterJoiningLocalPlayerComplete));
-// 		}
-// 	}
-// 	else
- 	{
-		FinishJoinSession(Result);
+	// Ignore non-game session join results
+	if (SessionName != NAME_GameSession)
+	{
+		return;
 	}
+
+	if (Result != EOnJoinSessionCompleteResult::Success)
+	{
+		return;
+	}
+
+	const FOnlineSessionAccelBytePtr SessionInterface = GetSessionInterface();
+	EARLY_RETURN_IF_INVALID(SessionInterface.IsValid(), "Session interface", );
+
+	// Remove our delegate handler for join session, we will rebind if we join another session
+	SessionInterface->ClearOnJoinSessionCompleteDelegate_Handle(JoinSessionDelegateHandle);
+	JoinSessionDelegateHandle.Reset();
+
+	FinishJoinSession(Result);
 }
 
 void UCommonSessionSubsystem::OnRegisterJoiningLocalPlayerComplete(const FUniqueNetId& PlayerId, EOnJoinSessionCompleteResult::Type Result)
@@ -1398,14 +2539,34 @@ void UCommonSessionSubsystem::FinishJoinSession(EOnJoinSessionCompleteResult::Ty
 {
 	if (Result == EOnJoinSessionCompleteResult::Success)
 	{
-		/*
-		 * when the current session is previously joining other's session. This will also
-		 * be called on the host side. This check is workaround to prevent travel for the current host.
-		 */
-		if (!IsLocalPlayerHostingSession())
+		// Before traveling to the session, we will want to check if the server has flagged this session as joinable
+		const FOnlineSessionAccelBytePtr SessionInterface = GetSessionInterface();
+		if (!ensure(SessionInterface.IsValid()))
+		{
+			UE_LOG(LogCommonSession, Warning, TEXT("FinishJoinSession: Unable to join game session as SessionInterface was invalid! "));
+			return;
+		}
+
+		FOnlineSessionSettings* SessionSettings = SessionInterface->GetSessionSettings(NAME_GameSession);
+		if (SessionSettings == nullptr)
+		{
+			UE_LOG(LogCommonSession, Warning, TEXT("FinishJoinSession: Unable to join game session as SessionSettings was nullptr!"));
+			return;
+		}
+
+		bool ServerConnectSettingValue;
+		if (!SessionSettings->Get(SETTING_SESSION_SERVER_CONNECT_READY, ServerConnectSettingValue))
+		{
+			// If the connect ready flag was not found, then listen to Session Update Notification to wait until server is ready
+			UE_LOG(LogCommonSession, Warning, TEXT("FinishJoinSession: connect ready flag was not found in session settings. Listening to Session Update Notification!"));
+			SessionInterface->AddOnUpdateSessionCompleteDelegate_Handle(FOnUpdateSessionCompleteDelegate::CreateUObject(this, &UCommonSessionSubsystem::OnUpdateSessionComplete));
+			return;
+		}
+
+		if (ServerConnectSettingValue == true)
 		{
 			InternalTravelToSession(NAME_GameSession);
-		}
+		}		
 	}
 	else
 	{
@@ -1513,19 +2674,49 @@ void UCommonSessionSubsystem::InternalTravelToSession(const FName SessionName)
 
 	FString URL;
 #if COMMONUSER_OSSV1
-	// travel to session
-	IOnlineSubsystem* OnlineSub = Online::GetSubsystem(GetWorld());
-	check(OnlineSub);
+	const FOnlineSessionAccelBytePtr SessionInterface = GetSessionInterface();
+	ensure(SessionInterface.IsValid());
 
-	IOnlineSessionPtr Sessions = OnlineSub->GetSessionInterface();
-	check(Sessions.IsValid());
-
-	if (!Sessions->GetResolvedConnectString(SessionName, URL))
+	FNamedOnlineSession* Session = SessionInterface->GetNamedSession(SessionName);
+	if (!ensure(Session != nullptr))
 	{
-		FText FailReason = NSLOCTEXT("NetworkErrors", "TravelSessionFailed", "Travel to Session failed.");
+		return;
+	}
+
+	TSharedPtr<FOnlineSessionInfoAccelByteV2> SessionInfo = StaticCastSharedPtr<FOnlineSessionInfoAccelByteV2>(Session->SessionInfo);
+	if (!ensure(SessionInfo.IsValid()))
+	{
+		return;
+	}
+
+	// If the server type for the created session is either NONE (local), then the connection info is in the session attributes
+	const EAccelByteV2SessionConfigurationServerType ServerType = SessionInfo->GetServerType();
+	if (ServerType == EAccelByteV2SessionConfigurationServerType::NONE)
+	{
+		if (!Session->SessionSettings.Get(SETTING_LOCALADDRESS, URL) || URL.IsEmpty())
+		{
+			UE_LOG(LogCommonSession, Error, TEXT("InternalTravelToSession failed as server type was of type NONE (local) and the local address in session settings was empty!"));
+			return;
+		}
+	}
+	else if(ServerType == EAccelByteV2SessionConfigurationServerType::P2P)
+	{
+		// Don't try to travel if the user is the P2P session leader
+		if(PlayerController->GetLocalPlayer()->GetPreferredUniqueNetId().GetUniqueNetId().ToSharedRef().Get() == SessionInfo->GetLeaderId().ToSharedRef().Get())
+		{
+			return;
+		}
+	}
+
+	// Otherwise, get the connection info from the SessionData received from the backend
+	if (!SessionInterface->GetResolvedConnectString(SessionName, URL))
+	{
+		FText FailReason = NSLOCTEXT("NetworkErrors", "TravelSessionFailed", "Travel to Session failed. Waiting for server update notification instead.");
 		UE_LOG(LogCommonSession, Error, TEXT("InternalTravelToSession(%s)"), *FailReason.ToString());
 		return;
 	}
+
+	// Otherwise, wait for server update notification
 #else
 	TSharedPtr<IOnlineServices> OnlineServices = GetServices(GetWorld(), EOnlineServices::Default);
 	check(OnlineServices);
@@ -1544,16 +2735,7 @@ void UCommonSessionSubsystem::InternalTravelToSession(const FName SessionName)
 	// #START @AccelByte Implementation : Add options for the prefered map, it will load the map on the server after first player join.
 	//URL.Append(TEXT("?preferedMap=%s"), *SearchSettings->);
 	// #END
-
-	// #START @AccelByte Implementation : Add options for the assigned team for this player
-	for (TTuple<FString, FString> ClientExtraArg : ClientExtraArgs)
-	{
-		URL.Append(FString::Printf(TEXT("?%s=%s"), *ClientExtraArg.Key, *ClientExtraArg.Value));
-	}
-	// reset ClientExtraArgs
-	ClientExtraArgs.Empty();
-	// #END
-
+	UE_LOG(LogCommonSession, Error, TEXT("Traveling to: %s"), *URL);
 	PlayerController->ClientTravel(URL, TRAVEL_Absolute);
 }
 
@@ -1561,7 +2743,7 @@ void UCommonSessionSubsystem::InternalTravelToSession(const FName SessionName)
 void UCommonSessionSubsystem::HandleSessionFailure(const FUniqueNetId& NetId, ESessionFailure::Type FailureType)
 {
 	UE_LOG(LogCommonSession, Warning, TEXT("UCommonSessionSubsystem::HandleSessionFailure(NetId: %s, FailureType: %s)"), *NetId.ToDebugString(), LexToString(FailureType));
-	
+
 	//@TODO: Probably need to do a bit more...
 }
 #endif // COMMONUSER_OSSV1
@@ -1602,11 +2784,8 @@ void UCommonSessionSubsystem::HandlePostLoadMap(UWorld* World)
 	}
 
 #if COMMONUSER_OSSV1
-	IOnlineSubsystem* OnlineSub = Online::GetSubsystem(GetWorld());
-	check(OnlineSub);
-
-	const IOnlineSessionPtr SessionInterface = OnlineSub->GetSessionInterface();
-	check(SessionInterface.IsValid());
+	const FOnlineSessionAccelBytePtr SessionInterface = GetSessionInterface();
+	EARLY_RETURN_IF_INVALID(SessionInterface.IsValid(), "Session interface", );
 
 	// If we're hosting a session, update the advertised map name.
 	if (HostSettings.IsValid())
@@ -1617,7 +2796,35 @@ void UCommonSessionSubsystem::HandlePostLoadMap(UWorld* World)
 		const FName SessionName(NAME_GameSession);
 		SessionInterface->UpdateSession(SessionName, *HostSettings, true);
 	}
+
+	const FNamedOnlineSession* Session = SessionInterface->GetNamedSession(NAME_GameSession);
+	if (Session == nullptr)
+	{
+		UE_LOG(LogCommonSession, Warning, TEXT("HandlePostLoadMap: There is no current session!"));
+		return;
+	}
+
+	const TSharedPtr<FOnlineSessionInfoAccelByteV2> SessionInfo = StaticCastSharedPtr<FOnlineSessionInfoAccelByteV2>(Session->SessionInfo);
+	EARLY_RETURN_IF_INVALID(SessionInfo.IsValid(), "Session info", );
+
+	if (SessionInfo->GetServerType() == EAccelByteV2SessionConfigurationServerType::P2P)
+	{
+		if (Session->LocalOwnerId.ToSharedRef().Get() != SessionInfo->GetLeaderId().ToSharedRef().Get())
+		{
+			return;
+		}
+
+		FOnlineSessionSettings SessionSettings = Session->SessionSettings;
+		bool bServerConnectReadyValue = false;
+		if (!SessionSettings.Get(SETTING_SESSION_SERVER_CONNECT_READY, bServerConnectReadyValue) || !bServerConnectReadyValue)
+		{
+			SessionSettings.Set(SETTING_SESSION_SERVER_CONNECT_READY, true);
+			SessionInterface->UpdateSession(Session->SessionName, SessionSettings);
+		}
+	}
 #endif // COMMONUSER_OSSV1
 }
 
 #undef LOCTEXT_NAMESPACE
+#undef EARLY_RETURN_IF_INVALID
+#undef EARLY_RETURN_IF_INVALID_WITH_DELEGATE
